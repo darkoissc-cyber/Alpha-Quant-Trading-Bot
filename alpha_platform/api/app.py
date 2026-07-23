@@ -149,9 +149,9 @@ def run_stress_test():
     return res
 
 @app.post("/api/trade/test")
-def trigger_test_trade(symbol: str = "XAUUSD", signal_type: str = "BUY", volume: float = 0.10, price: float = 2035.50):
-    sl = price - 10.0 if signal_type.upper() == "BUY" else price + 10.0
-    tp = price + 20.0 if signal_type.upper() == "BUY" else price - 20.0
+def trigger_test_trade(symbol: str = "XAUUSD", signal_type: str = "BUY", volume: float = 0.10, price: float = 4050.30):
+    sl = price - 20.0 if signal_type.upper() == "BUY" else price + 20.0
+    tp = price + 30.0 if signal_type.upper() == "BUY" else price - 30.0
     
     # Send Telegram Notification
     success = telegram_notifier.notify_trade_opened(symbol, signal_type, volume, price, sl, tp)
