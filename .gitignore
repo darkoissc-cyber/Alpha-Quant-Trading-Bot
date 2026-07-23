@@ -30,6 +30,12 @@ venv/
 env/
 ENV/
 
+# Databases, Backups, and Logs
+*.db
+backups/
+logs/
+*.log
+
 # Node / React Dashboard
 alpha_platform/dashboard/node_modules/
 alpha_platform/dashboard/build/
@@ -41,6 +47,3 @@ alpha_platform/dashboard/.next/
 *.swp
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log

@@ -31,6 +31,9 @@ validation_gate = StatisticalValidationGate()
 stress_engine = StressTestingEngine()
 execution_tracker = ExecutionQualityTracker()
 
+from alpha_platform.system.health_monitor import health_monitor, shutdown_handler
+from alpha_platform.system.metrics import metrics_collector, measure_execution_time
+
 @app.get("/")
 def read_root():
     return {
@@ -39,6 +42,14 @@ def read_root():
         "broker": settings.BROKER_NAME,
         "instruments": settings.SUPPORTED_INSTRUMENTS
     }
+
+@app.get("/api/system/health")
+def get_system_health() -> Dict[str, Any]:
+    return health_monitor.inspect_diagnostics()
+
+@app.get("/api/system/metrics")
+def get_system_metrics() -> Dict[str, Any]:
+    return metrics_collector.get_summary()
 
 @app.get("/api/portfolio")
 def get_portfolio_overview() -> Dict[str, Any]:
