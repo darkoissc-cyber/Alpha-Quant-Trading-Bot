@@ -44,8 +44,8 @@ class MetaLabelModelTrainer:
 
     def predict_trade_quality(self, features: Dict[str, float]) -> Tuple[bool, float, float]:
         if self.model is None:
-            # Fallback if un-trained: allow with default threshold
-            return True, 0.60, 0.60
+            logger.warning("[AI Meta-Labeler] Predict called on UNTRAINED model. Vetoing trade for safety.")
+            return False, 0.0, 0.0
 
         df_feat = pd.DataFrame([features]).reindex(columns=self.feature_names, fill_value=0.0)
         raw_prob = float(self.model.predict_proba(df_feat)[0, 1])

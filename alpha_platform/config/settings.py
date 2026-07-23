@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
     
+    # Real-Time Economic News Filter Governance
+    NEWS_ENABLED: bool = True
+    NEWS_PROVIDER: str = "forexfactory"
+    NEWS_REFRESH_INTERVAL_MINUTES: int = 15
+    NEWS_BLOCK_BEFORE_MINUTES: int = 30
+    NEWS_BLOCK_AFTER_MINUTES: int = 30
+    NEWS_TIMEOUT_SECONDS: int = 10
+    NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
+    FAIL_SAFE_NEWS: bool = False
+    
     class Config:
         env_file = ".env"
         extra = "ignore"

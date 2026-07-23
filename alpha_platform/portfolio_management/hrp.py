@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
+from scipy.spatial.distance import squareform
 from typing import Dict
 
 class HierarchicalRiskParity:
@@ -29,9 +30,12 @@ class HierarchicalRiskParity:
 
         # Distance matrix
         dist = np.sqrt(np.clip(0.5 * (1.0 - corr), 0, 1))
+        # Ensure zero diagonal
+        np.fill_diagonal(dist, 0.0)
 
-        # Hierarchical Clustering Linkage
-        link = linkage(dist, method="single")
+        # Hierarchical Clustering Linkage (using condensed distance matrix)
+        condensed_dist = squareform(dist, checks=False)
+        link = linkage(condensed_dist, method="single")
         
         # Quasi-Diagonalization sorting
         sort_ix = list(range(len(cov_matrix)))

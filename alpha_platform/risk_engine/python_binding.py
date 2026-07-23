@@ -8,15 +8,16 @@ from alpha_platform.risk_engine.advanced_risk import (
     RiskBudgetManager,
     DynamicPositionRiskManager
 )
+from alpha_platform.market_data.news_filter import NewsFilter
 
 class RiskEngine:
     """
     Python wrapper enforcing Risk Engine authority.
     Evaluates Soft limits (1.5% daily drawdown), Hard limits (3.5% total drawdown kill switch),
-    Correlation Matrix vetoes, Periodic Risk Budgets, and Dynamic Position Scaling.
+    Correlation Matrix vetoes, Periodic Risk Budgets, Dynamic Position Scaling, and Real-Time News Window Vetoes.
     """
 
-    def __init__(self, initial_equity: float = 10000.0):
+    def __init__(self, initial_equity: float = 10000.0, news_filter: Optional[NewsFilter] = None):
         self.peak_equity = initial_equity
         self.day_start_equity = initial_equity
         self.week_start_equity = initial_equity
@@ -24,6 +25,7 @@ class RiskEngine:
         self.emergency_kill_active = False
 
         # Advanced Risk Subsystems
+        self.news_filter = news_filter or NewsFilter()
         self.correlation_engine = CorrelationMatrixEngine(max_allowed_correlation=0.75)
         self.budget_manager = RiskBudgetManager(
             daily_budget_pct=settings.SOFT_DAILY_DRAWDOWN_LIMIT_PCT,
@@ -77,7 +79,18 @@ class RiskEngine:
                 hard_limit_exceeded=True
             )
 
-        # 3. Periodic Risk Budget & Circuit Breaker Check
+        # 3. Real-Time Economic News Filter Check
+        news_blocked, news_reason = self.news_filter.is_news_blocked(symbol)
+        if news_blocked:
+            return RiskCheckResult(
+                passed=False,
+                veto_reason=f"News Veto: {news_reason}",
+                scaled_position_size=0.0,
+                soft_limit_exceeded=False,
+                hard_limit_exceeded=False
+            )
+
+        # 4. Periodic Risk Budget & Circuit Breaker Check
         budget_ok, budget_reason = self.budget_manager.check_risk_budget(
             current_equity=current_equity,
             day_start_equity=self.day_start_equity,

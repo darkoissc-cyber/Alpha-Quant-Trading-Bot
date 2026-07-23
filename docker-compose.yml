@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  alpha_quant_engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha_quant_engine
+    restart: always
+    environment:
+      - ENVIRONMENT=production
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - POSTGRES_HOST=postgres
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+
+  redis:
+    image: redis:7-alpine
+    container_name: alpha_quant_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: alpha_quant_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: alpha_quant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

@@ -13,23 +13,28 @@ except ImportError:
     mt5 = None
     HAS_MT5_LIB = False
 
+class BrokerConnectionError(Exception):
+    """Raised when broker connection fails in live/production mode."""
+    pass
+
 class MT5ExecutionBridge:
     """
     Python execution bridge connecting to Exness MetaTrader 5 Terminal.
-    Handles direct order dispatch, symbol suffix resolution (e.g. XAUUSDm), and position tracking.
+    Handles direct order dispatch, symbol suffix resolution (e.g. XAUUSDm), position tracking,
+    server-side SL/TP modifications, and partial closes.
     """
 
-    def __init__(self):
+    def __init__(self, allow_simulation: bool = True):
         self.connected = False
         self.login = settings.MT5_ACCOUNT_LOGIN
         self.password = settings.MT5_ACCOUNT_PASSWORD
         self.server = settings.MT5_ACCOUNT_SERVER
+        self.allow_simulation = allow_simulation
 
     def resolve_symbol(self, symbol: str) -> str:
         if not HAS_MT5_LIB or mt5.terminal_info() is None:
             return symbol
         
-        # Check standard symbol vs Exness suffix symbol (e.g., XAUUSD vs XAUUSDm)
         possible_symbols = [symbol, f"{symbol}m", f"{symbol}.c", f"{symbol}."]
         for sym in possible_symbols:
             if mt5.symbol_info(sym) is not None:
@@ -47,13 +52,19 @@ class MT5ExecutionBridge:
             )
             if initialized:
                 self.connected = True
-                logger.info(f"MetaTrader 5 Direct Bridge CONNECTED successfully to {self.login}")
+                logger.info(f"MetaTrader 5 Direct Bridge CONNECTED successfully to account {self.login}")
                 return True
             else:
-                logger.error(f"MT5 Initialization failed: {mt5.last_error()}")
-        
+                err_msg = f"MT5 Initialization failed: {mt5.last_error()}"
+                logger.error(err_msg)
+                if settings.ENVIRONMENT == "production" or not self.allow_simulation:
+                    raise BrokerConnectionError(err_msg)
+
+        if settings.ENVIRONMENT == "production" or not self.allow_simulation:
+            raise BrokerConnectionError("MetaTrader5 library or valid account credentials unavailable in production mode.")
+
         self.connected = True
-        logger.info(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login}")
+        logger.warning(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login}")
         return True
 
     async def send_order(
@@ -140,6 +151,63 @@ class MT5ExecutionBridge:
                 if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                     return {"status": "CLOSED", "ticket": ticket, "close_price": res.price, "profit": pos.profit}
         return {"status": "SIMULATED_CLOSED", "ticket": ticket, "profit": 0.22}
+
+    async def modify_order_sltp(self, ticket: int, sl: float, tp: float) -> Dict[str, Any]:
+        """Modifies Stop-Loss and Take-Profit of an open position on MT5 server."""
+        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos = positions[0]
+                request = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": ticket,
+                    "symbol": pos.symbol,
+                    "sl": sl,
+                    "tp": tp,
+                }
+                result = mt5.order_send(request)
+                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"Position #{ticket} SL/TP modified on MT5: SL={sl}, TP={tp}")
+                    return {"status": "MODIFIED", "ticket": ticket, "sl": sl, "tp": tp}
+                else:
+                    reason = result.comment if result else "Unknown MT5 modify error"
+                    logger.error(f"Failed to modify position #{ticket} SL/TP: {reason}")
+                    return {"status": "REJECTED", "reason": reason}
+
+        logger.info(f"[Simulation] Modified position #{ticket} SL/TP: SL={sl}, TP={tp}")
+        return {"status": "SIMULATED_MODIFIED", "ticket": ticket, "sl": sl, "tp": tp}
+
+    async def partial_close_position(self, ticket: int, close_volume: float) -> Dict[str, Any]:
+        """Partially closes an open position by specifying a partial volume."""
+        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos = positions[0]
+                vol_to_close = min(pos.volume, close_volume)
+                tick = mt5.symbol_info_tick(pos.symbol)
+                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+
+                req = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "position": ticket,
+                    "symbol": pos.symbol,
+                    "volume": vol_to_close,
+                    "type": close_type,
+                    "price": price,
+                    "deviation": 20,
+                    "magic": 777999,
+                    "comment": "Alpha Quant Partial Close",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"Position #{ticket} PARTIALLY CLOSED: {vol_to_close} lot @ {res.price}")
+                    return {"status": "PARTIALLY_CLOSED", "ticket": ticket, "closed_volume": vol_to_close, "close_price": res.price}
+
+        logger.info(f"[Simulation] Partially closed position #{ticket}: {close_volume} lot")
+        return {"status": "SIMULATED_PARTIAL_CLOSE", "ticket": ticket, "closed_volume": close_volume}
 
     async def get_active_positions(self) -> List[Dict[str, Any]]:
         if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
