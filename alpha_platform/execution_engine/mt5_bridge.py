@@ -16,7 +16,7 @@ except ImportError:
 class MT5ExecutionBridge:
     """
     Python execution bridge connecting to Exness MetaTrader 5 Terminal.
-    Handles order dispatch, execution acknowledgments, and real-time position synchronization.
+    Handles direct order dispatch, symbol suffix resolution (e.g. XAUUSDm), and position tracking.
     """
 
     def __init__(self):
@@ -24,6 +24,18 @@ class MT5ExecutionBridge:
         self.login = settings.MT5_ACCOUNT_LOGIN
         self.password = settings.MT5_ACCOUNT_PASSWORD
         self.server = settings.MT5_ACCOUNT_SERVER
+
+    def resolve_symbol(self, symbol: str) -> str:
+        if not HAS_MT5_LIB or mt5.terminal_info() is None:
+            return symbol
+        
+        # Check standard symbol vs Exness suffix symbol (e.g., XAUUSD vs XAUUSDm)
+        possible_symbols = [symbol, f"{symbol}m", f"{symbol}.c", f"{symbol}."]
+        for sym in possible_symbols:
+            if mt5.symbol_info(sym) is not None:
+                mt5.symbol_select(sym, True)
+                return sym
+        return symbol
 
     async def connect(self) -> bool:
         if HAS_MT5_LIB and self.login and self.password:
@@ -40,7 +52,6 @@ class MT5ExecutionBridge:
             else:
                 logger.error(f"MT5 Initialization failed: {mt5.last_error()}")
         
-        # Fallback for Cloud Linux / Simulation environment
         self.connected = True
         logger.info(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login}")
         return True
@@ -55,19 +66,24 @@ class MT5ExecutionBridge:
         tp: float,
         magic_number: int = 777999
     ) -> Dict[str, Any]:
+        resolved_symbol = self.resolve_symbol(symbol)
+
         if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
-            # Execute real order on MT5 terminal
+            tick = mt5.symbol_info_tick(resolved_symbol)
+            fill_price = tick.ask if signal_type == SignalType.BUY else tick.bid
             order_type = mt5.ORDER_TYPE_BUY if signal_type == SignalType.BUY else mt5.ORDER_TYPE_SELL
+            
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
+                "symbol": resolved_symbol,
                 "volume": volume,
                 "type": order_type,
-                "price": price,
+                "price": fill_price,
                 "sl": sl,
                 "tp": tp,
+                "deviation": 20,
                 "magic": magic_number,
-                "comment": "Alpha Quant Automated Order",
+                "comment": "Alpha Quant Live Order",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
@@ -87,8 +103,7 @@ class MT5ExecutionBridge:
                 logger.error(f"MT5 Order placement failed: {reason}")
                 return {"status": "REJECTED", "reason": reason}
 
-        # Simulated order response for Cloud API
-        logger.info(f"Dispatching simulated order to Exness MT5: {symbol} {signal_type.name} {volume} Lot @ {price}")
+        logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
         await asyncio.sleep(0.05)
         return {
             "status": "FILLED",
