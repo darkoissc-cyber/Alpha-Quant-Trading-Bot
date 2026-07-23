@@ -1,19 +1,78 @@
+import asyncio
+import contextlib
+import random
+from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, List
 
 from alpha_platform.config.settings import settings
+from alpha_platform.config.logging_config import logger
 from alpha_platform.api.websocket_manager import ws_manager
 from alpha_platform.risk_engine.python_binding import RiskEngine
 from alpha_platform.model_governance.registry import ModelRegistry
 from alpha_platform.statistical_validation.walk_forward import StatisticalValidationGate
 from alpha_platform.stress_testing.stress_engine import StressTestingEngine
 from alpha_platform.execution_analytics.execution_tracker import ExecutionQualityTracker
+from alpha_platform.feature_store.time_series_db import TimeSeriesDataStore
+from alpha_platform.core.types import Bar, Tick
+
+# Global Instance State
+risk_engine = RiskEngine(initial_equity=10000.0)
+model_registry = ModelRegistry()
+validation_gate = StatisticalValidationGate()
+stress_engine = StressTestingEngine()
+execution_tracker = ExecutionQualityTracker()
+ts_store = TimeSeriesDataStore("time_series_data.db")
+
+async def run_247_data_collector_loop():
+    logger.info("🚀 Starting 24/7 Continuous Background Data Collector & Strategy Daemon...")
+    base_prices = {"XAUUSD": 2650.0, "EURUSD": 1.0850, "GBPUSD": 1.2950, "BTCUSD": 95000.0}
+    
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            ticks = []
+            bars = []
+            
+            for symbol, base in base_prices.items():
+                noise = random.uniform(-0.0005, 0.0005) * base
+                bid = max(0.01, base + noise)
+                ask = bid + (0.30 if symbol == "XAUUSD" else (0.00015 if "USD" in symbol and "BTC" not in symbol else 10.0))
+                vol = random.uniform(1.0, 50.0)
+                
+                tick = Tick(symbol, now, round(bid, 4), round(ask, 4), round(vol, 2))
+                bar = Bar(symbol, now, round(bid-0.1, 4), round(bid+0.2, 4), round(bid-0.2, 4), round(bid, 4), round(vol*10, 2), tick_count=10)
+                
+                ticks.append(tick)
+                bars.append(bar)
+                base_prices[symbol] = bid  # Random walk simulation
+                
+            ts_store.insert_ticks(ticks)
+            ts_store.insert_candles(bars)
+            
+            # Periodically refresh news filter
+            risk_engine.news_filter.refresh_events_if_needed()
+            
+        except asyncio.CancelledError:
+            logger.info("Stopping 24/7 Background Data Collector Daemon.")
+            break
+        except Exception as e:
+            logger.error(f"Error in 24/7 data collector daemon: {e}")
+            
+        await asyncio.sleep(10)
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    collector_task = asyncio.create_task(run_247_data_collector_loop())
+    yield
+    collector_task.cancel()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Institutional Quantitative Trading, AI Meta-Labeling & Risk Engine Gateway API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -23,13 +82,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global Instance State
-risk_engine = RiskEngine(initial_equity=10000.0)
-model_registry = ModelRegistry()
-validation_gate = StatisticalValidationGate()
-stress_engine = StressTestingEngine()
-execution_tracker = ExecutionQualityTracker()
 
 from alpha_platform.system.health_monitor import health_monitor, shutdown_handler
 from alpha_platform.system.metrics import metrics_collector, measure_execution_time

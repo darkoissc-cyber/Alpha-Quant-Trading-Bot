@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 
 from alpha_platform.config.settings import settings
 from alpha_platform.core.types import Bar, Tick, SignalType
@@ -29,7 +29,7 @@ def run_system_verification():
 
     # 1. Test Market Data Quality & Microstructure
     filter_obj = DataQualityFilter()
-    tick = Tick("XAUUSD", datetime.utcnow(), 1950.10, 1950.40, 10.0)
+    tick = Tick("XAUUSD", datetime.now(timezone.utc), 1950.10, 1950.40, 10.0)
     cleaned_tick = filter_obj.clean_tick(tick)
     assert cleaned_tick is not None, "Tick cleaning failed"
     print("[1/9] Data Quality Layer: PASSED")
@@ -42,7 +42,7 @@ def run_system_verification():
     # 3. Test Feature Store (Point in Time)
     store = CentralFeatureStore()
     bars = [
-        Bar("XAUUSD", datetime.utcnow(), 1950.0 + i*0.1, 1951.0 + i*0.1, 1949.0 + i*0.1, 1950.5 + i*0.1, 100.0)
+        Bar("XAUUSD", datetime.now(timezone.utc), 1950.0 + i*0.1, 1951.0 + i*0.1, 1949.0 + i*0.1, 1950.5 + i*0.1, 100.0)
         for i in range(30)
     ]
     feats = store.get_features("XAUUSD", bars)

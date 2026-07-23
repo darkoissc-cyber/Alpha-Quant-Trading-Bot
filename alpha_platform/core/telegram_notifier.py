@@ -55,7 +55,7 @@ class TelegramNotifier:
             return False
 
     async def send_message_async(self, text: str, parse_mode: str = "Markdown") -> bool:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.send_message_sync, text, parse_mode)
 
     def notify_trade_opened(self, symbol: str, signal_type: str, volume: float, price: float, sl: float, tp: float):

@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: alpha-quant-platform
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn alpha_platform.api.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/system/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: false
+      - key: PROJECT_NAME
+        value: "Alpha Quant Platform"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: MT5_ACCOUNT_LOGIN
+        sync: false
+      - key: MT5_ACCOUNT_PASSWORD
+        sync: false
+      - key: MT5_ACCOUNT_SERVER
+        sync: false

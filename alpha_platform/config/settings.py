@@ -1,5 +1,6 @@
 import os
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from typing import List, Dict
 
 from dotenv import load_dotenv
@@ -7,6 +8,8 @@ load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(env_file=".env", extra="ignore")
+
     PROJECT_NAME: str = "Alpha Quant Platform"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
@@ -61,9 +64,5 @@ class Settings(BaseSettings):
     NEWS_TIMEOUT_SECONDS: int = 10
     NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
     FAIL_SAFE_NEWS: bool = False
-    
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
 
 settings = Settings()

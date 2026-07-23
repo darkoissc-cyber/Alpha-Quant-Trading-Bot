@@ -1,3 +1,4 @@
+import os
 import abc
 import json
 import urllib.request
@@ -46,24 +47,24 @@ class BaseNewsProvider(abc.ABC):
 class ForexFactoryNewsProvider(BaseNewsProvider):
     """
     ForexFactory Economic Calendar Provider.
-    Fetches JSON economic calendar feed with 10-second HTTP timeout and graceful exception handling.
+    Fetches JSON economic calendar feed via faireconomy.media mirror
+    with 10-second HTTP timeout, class-level caching, persistent disk cache,
+    and graceful exception handling.
     """
 
-    FEED_URL = "https://nodedata.forexfactory.com/daily/calendar.json"
-    FALLBACK_URL = "https://nodedata.forexfactory.com/weekly/calendar.json"
+    PRIMARY_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    DISK_CACHE_PATH = os.path.join("logs", "news_calendar_cache.json")
+    
+    # Shared class-level cache to prevent HTTP 429 rate-limiting across instances
+    _shared_cache_events: List[NewsEvent] = []
+    _shared_cache_time: Optional[datetime] = None
+    _cache_ttl_seconds: int = 900  # 15 minutes memory cache
 
     def __init__(self, timeout_seconds: int = 10):
         self.timeout_seconds = timeout_seconds
 
-    def fetch_events(self) -> List[NewsEvent]:
+    def _parse_raw_items(self, raw_data: List[Dict]) -> List[NewsEvent]:
         events: List[NewsEvent] = []
-        raw_data = self._fetch_raw_json(self.FEED_URL)
-        if not raw_data:
-            raw_data = self._fetch_raw_json(self.FALLBACK_URL)
-        if not raw_data:
-            logger.warning("[NewsFilter] Failed to fetch news data from primary & fallback ForexFactory endpoints.")
-            return []
-
         for item in raw_data:
             try:
                 currency = item.get("country", "").upper()
@@ -74,6 +75,8 @@ class ForexFactoryNewsProvider(BaseNewsProvider):
                     impact = NewsImpact.HIGH
                 elif "MED" in impact_raw or impact_raw == "ORANGE" or impact_raw == "YELLOW":
                     impact = NewsImpact.MEDIUM
+                elif "HOLIDAY" in impact_raw:
+                    continue  # Skip holidays
                 else:
                     impact = NewsImpact.LOW
 
@@ -81,14 +84,13 @@ class ForexFactoryNewsProvider(BaseNewsProvider):
                 if not time_str:
                     continue
 
-                # Parse ISO date string (e.g. 2026-07-24T12:30:00-04:00 or ISO UTC)
                 try:
                     dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
                     dt_utc = dt.astimezone(timezone.utc)
                 except ValueError:
                     continue
 
-                event_id = str(item.get("id", f"{currency}_{title}_{dt_utc.timestamp()}"))
+                event_id = f"{currency}_{title}_{dt_utc.timestamp()}"
 
                 event = NewsEvent(
                     event_id=event_id,
@@ -104,21 +106,79 @@ class ForexFactoryNewsProvider(BaseNewsProvider):
                 events.append(event)
             except Exception as e:
                 logger.debug(f"[NewsFilter] Error parsing news event item: {e}")
-
         return events
+
+    def fetch_events(self) -> List[NewsEvent]:
+        now = datetime.now(timezone.utc)
+        
+        # 1. Return memory-cached events if TTL is still valid
+        if ForexFactoryNewsProvider._shared_cache_time is not None:
+            elapsed = (now - ForexFactoryNewsProvider._shared_cache_time).total_seconds()
+            if elapsed < ForexFactoryNewsProvider._cache_ttl_seconds and ForexFactoryNewsProvider._shared_cache_events:
+                return ForexFactoryNewsProvider._shared_cache_events
+
+        # 2. Try fetching live data from network
+        raw_data = self._fetch_raw_json(self.PRIMARY_URL)
+        if raw_data:
+            events = self._parse_raw_items(raw_data)
+            if events:
+                ForexFactoryNewsProvider._shared_cache_events = events
+                ForexFactoryNewsProvider._shared_cache_time = now
+                self._save_disk_cache(raw_data)
+                return events
+
+        # 3. Memory cache fallback
+        if ForexFactoryNewsProvider._shared_cache_events:
+            logger.info("[NewsFilter] Using memory-cached calendar events.")
+            return ForexFactoryNewsProvider._shared_cache_events
+
+        # 4. Disk cache fallback
+        disk_raw = self._load_disk_cache()
+        if disk_raw:
+            events = self._parse_raw_items(disk_raw)
+            if events:
+                logger.info(f"[NewsFilter] Loaded {len(events)} calendar events from disk cache ({self.DISK_CACHE_PATH}).")
+                ForexFactoryNewsProvider._shared_cache_events = events
+                ForexFactoryNewsProvider._shared_cache_time = now
+                return events
+
+        logger.warning("[NewsFilter] Failed to fetch news data and no disk cache available.")
+        return []
+
+    def _save_disk_cache(self, raw_data: List[Dict]):
+        try:
+            os.makedirs(os.path.dirname(self.DISK_CACHE_PATH), exist_ok=True)
+            with open(self.DISK_CACHE_PATH, "w", encoding="utf-8") as f:
+                json.dump(raw_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"[NewsFilter] Could not save disk cache: {e}")
+
+    def _load_disk_cache(self) -> Optional[List[Dict]]:
+        try:
+            if os.path.exists(self.DISK_CACHE_PATH):
+                with open(self.DISK_CACHE_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.debug(f"[NewsFilter] Could not load disk cache: {e}")
+        return None
 
     def _fetch_raw_json(self, url: str) -> Optional[List[Dict]]:
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AlphaQuant/1.0"}
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
                 if response.status == 200:
                     content = response.read().decode("utf-8")
                     return json.loads(content)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                logger.warning(f"[NewsFilter] Rate limited (HTTP 429) when fetching {url}. Using cached/fallback data.")
+            else:
+                logger.warning(f"[NewsFilter] HTTP {e.code} error for {url}: {e.reason}")
         except Exception as e:
-            logger.warning(f"[NewsFilter] HTTP request failed for {url}: {e}")
+            logger.warning(f"[NewsFilter] Network error fetching {url}: {e}")
         return None
 
 
