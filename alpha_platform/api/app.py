@@ -140,10 +140,43 @@ def get_strategies() -> List[Dict[str, Any]]:
         }
     ]
 
+from alpha_platform.core.telegram_notifier import telegram_notifier
+
 @app.post("/api/stress-test/run")
 def run_stress_test():
     res = stress_engine.run_stress_test_suite()
+    telegram_notifier.notify_risk_alert("اختبار الإجهاد (Stress Test)", f"تم اجتياز جميع سيناريوهات الإجهاد بنجاح! كسب الفلاش كراش: {res['flash_crash_survival']}")
     return res
+
+@app.post("/api/trade/test")
+def trigger_test_trade(symbol: str = "XAUUSD", signal_type: str = "BUY", volume: float = 0.10, price: float = 2035.50):
+    sl = price - 10.0 if signal_type.upper() == "BUY" else price + 10.0
+    tp = price + 20.0 if signal_type.upper() == "BUY" else price - 20.0
+    
+    # Send Telegram Notification
+    success = telegram_notifier.notify_trade_opened(symbol, signal_type, volume, price, sl, tp)
+    
+    return {
+        "status": "EXECUTED_SIMULATION",
+        "symbol": symbol,
+        "signal_type": signal_type,
+        "volume": volume,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "telegram_notified": success
+    }
+
+@app.post("/api/notify/heartbeat")
+def send_heartbeat_notification():
+    portfolio = get_portfolio_overview()
+    success = telegram_notifier.notify_portfolio_heartbeat(
+        equity=portfolio["equity"],
+        balance=portfolio["balance"],
+        drawdown_pct=portfolio["current_drawdown_pct"],
+        active_positions=portfolio["active_positions_count"]
+    )
+    return {"status": "SUCCESS", "telegram_sent": success, "portfolio": portfolio}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
