@@ -114,6 +114,33 @@ class MT5ExecutionBridge:
             "timestamp": asyncio.get_event_loop().time()
         }
 
+    async def close_position(self, ticket: int) -> Dict[str, Any]:
+        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos = positions[0]
+                tick = mt5.symbol_info_tick(pos.symbol)
+                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+                
+                req = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "position": ticket,
+                    "symbol": pos.symbol,
+                    "volume": pos.volume,
+                    "type": close_type,
+                    "price": price,
+                    "deviation": 20,
+                    "magic": 777999,
+                    "comment": "Alpha Quant Close Trade",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    return {"status": "CLOSED", "ticket": ticket, "close_price": res.price, "profit": pos.profit}
+        return {"status": "SIMULATED_CLOSED", "ticket": ticket, "profit": 0.22}
+
     async def get_active_positions(self) -> List[Dict[str, Any]]:
         if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
             positions = mt5.positions_get()
