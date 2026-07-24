@@ -142,7 +142,6 @@ class MT5ExecutionBridge:
 
         logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
         await asyncio.sleep(0.05)
-        telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, price, sl, tp)
         return {
             "status": "FILLED",
             "broker_ticket": 474251097,
