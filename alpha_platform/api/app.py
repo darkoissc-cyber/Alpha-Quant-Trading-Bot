@@ -17,6 +17,7 @@ from alpha_platform.stress_testing.stress_engine import StressTestingEngine
 from alpha_platform.execution_analytics.execution_tracker import ExecutionQualityTracker
 from alpha_platform.feature_store.time_series_db import TimeSeriesDataStore
 from alpha_platform.core.types import Bar, Tick
+from alpha_platform.strategy_lifecycle.strategy_runner import StrategyRunner
 
 # Global Instance State
 risk_engine = RiskEngine(initial_equity=10000.0)
@@ -25,6 +26,12 @@ validation_gate = StatisticalValidationGate()
 stress_engine = StressTestingEngine()
 execution_tracker = ExecutionQualityTracker()
 ts_store = TimeSeriesDataStore("time_series_data.db")
+strategy_runner = StrategyRunner(
+    data_store=ts_store,
+    risk_engine=risk_engine,
+    interval_seconds=30,
+    max_orders_per_cycle=1,
+)
 
 async def run_247_data_collector_loop():
     logger.info("🚀 Starting 24/7 Continuous Background Data Collector & Strategy Daemon...")
@@ -66,8 +73,18 @@ async def run_247_data_collector_loop():
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     collector_task = asyncio.create_task(run_247_data_collector_loop())
-    yield
-    collector_task.cancel()
+    strategy_task = asyncio.create_task(strategy_runner.loop())
+    logger.info("StrategyRunner registered in lifespan")
+    try:
+        yield
+    finally:
+        strategy_runner.stop()
+        for t in (collector_task, strategy_task):
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

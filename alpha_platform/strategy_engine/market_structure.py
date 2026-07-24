@@ -66,7 +66,7 @@ class InstitutionalMarketStructureAnalyzer:
 
             # Swing Low: lowest in window left and right
             if all(lows[i] <= lows[i - k] for k in range(1, w + 1)) and all(lows[i] < lows[i + k] for k in range(1, w + 1)):
-                swing_lows.append(SwingPoint(index=i, price=lows[i], is_low=False, timestamp=bars[i].timestamp))
+                swing_lows.append(SwingPoint(index=i, price=lows[i], is_high=False, timestamp=bars[i].timestamp))
 
         return swing_highs, swing_lows
 
