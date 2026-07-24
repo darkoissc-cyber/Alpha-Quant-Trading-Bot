@@ -75,6 +75,10 @@ class TelegramNotifier:
             import re
             err_body = re.sub(r"[A-Za-z0-9+/=]{32,}", "[REDACTED]", err_body)
             logger.error(f"HTTPError sending Telegram notification: {err_body}")
+            # If parse error occurred (e.g. HTTP 400 bad markdown entity), retry with plain text parse_mode=None
+            if "can't parse entities" in err_body and parse_mode is not None:
+                logger.info("Retrying Telegram notification in plain text mode (bypassing markdown syntax error)...")
+                return self.send_message_sync(text, parse_mode=None)
             return False
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}")

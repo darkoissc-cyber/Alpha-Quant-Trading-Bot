@@ -350,7 +350,7 @@ class StrategyRunner:
                     rr = abs(c.take_profit - c.entry_price) / max(1e-5, abs(c.entry_price - c.stop_loss))
                     text = (
                         f"🚨 *إشارة جديدة / NEW SIGNAL* (cycle {cycle_id})\n\n"
-                        f"• {c.strategy_id}\n"
+                        f"• {c.strategy_id.replace('_', ' ')}\n"
                         f"• {c.symbol} — *{c.signal_type.name}*\n"
                         f"• Entry: `{c.entry_price:.4f}`\n"
                         f"• SL: `{c.stop_loss:.4f}`\n"
