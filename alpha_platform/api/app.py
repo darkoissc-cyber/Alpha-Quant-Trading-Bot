@@ -36,8 +36,42 @@ strategy_runner = StrategyRunner(
     max_orders_per_cycle=1,
 )
 
+def seed_historical_bars_if_needed():
+    from datetime import timedelta
+    for symbol in ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]:
+        existing = ts_store.query_candles(symbol, limit=60)
+        if len(existing) < 50:
+            logger.info(f"Seeding historical bars for {symbol} (currently {len(existing)} bars)...")
+            mt5_active = HAS_MT5_LIB and mt5_bridge.connected and mt5 is not None and mt5.terminal_info() is not None
+            seeded_bars = []
+            if mt5_active:
+                try:
+                    resolved = mt5_bridge.resolve_symbol(symbol)
+                    rates = mt5.copy_rates_from_pos(resolved, mt5.TIMEFRAME_M1, 0, 60)
+                    if rates is not None and len(rates) > 0:
+                        for r in rates:
+                            bar_dt = datetime.fromtimestamp(int(r['time']), tz=timezone.utc)
+                            b = Bar(symbol, bar_dt, round(float(r['open']), 4), round(float(r['high']), 4), round(float(r['low']), 4), round(float(r['close']), 4), round(float(r['tick_volume']), 2), tick_count=int(r['tick_volume']))
+                            seeded_bars.append(b)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch MT5 historical seed bars for {symbol}: {e}")
+            if not seeded_bars:
+                base = 2650.0 if symbol == "XAUUSD" else (1.0850 if symbol == "EURUSD" else (1.2950 if symbol == "GBPUSD" else 95000.0))
+                now = datetime.now(timezone.utc)
+                curr_price = base
+                for i in range(60):
+                    bar_time = now - timedelta(minutes=(60 - i))
+                    noise = random.uniform(-0.0008, 0.0008) * curr_price
+                    curr_price = max(0.01, curr_price + noise)
+                    b = Bar(symbol, bar_time, round(curr_price - 0.1, 4), round(curr_price + 0.3, 4), round(curr_price - 0.3, 4), round(curr_price, 4), 100.0, tick_count=10)
+                    seeded_bars.append(b)
+            if seeded_bars:
+                ts_store.insert_candles(seeded_bars)
+                logger.info(f"Successfully seeded {len(seeded_bars)} historical bars for {symbol}.")
+
 async def run_247_data_collector_loop():
     logger.info("🚀 Starting 24/7 Continuous Background Data Collector & Strategy Daemon...")
+    seed_historical_bars_if_needed()
     base_prices = {"XAUUSD": 2650.0, "EURUSD": 1.0850, "GBPUSD": 1.2950, "BTCUSD": 95000.0}
     
     while True:
