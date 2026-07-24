@@ -28,9 +28,9 @@ class Settings(BaseSettings):
     
     # Execution & Broker Settings
     BROKER_NAME: str = "Exness MT5"
-    MT5_ACCOUNT_LOGIN: int = int(os.getenv("MT5_ACCOUNT_LOGIN", 0))
+    MT5_ACCOUNT_LOGIN: int = int(os.getenv("MT5_ACCOUNT_LOGIN", "474251097"))
     MT5_ACCOUNT_PASSWORD: str = os.getenv("MT5_ACCOUNT_PASSWORD", "")
-    MT5_ACCOUNT_SERVER: str = os.getenv("MT5_ACCOUNT_SERVER", "Exness-Trial5")
+    MT5_ACCOUNT_SERVER: str = os.getenv("MT5_ACCOUNT_SERVER", "Exness-MT5Trial15")
     MT5_ZMQ_PUB_PORT: int = 5555  # Python Pub / MT5 Sub
     MT5_ZMQ_REP_PORT: int = 5556  # Python Rep / MT5 Req
     SUPPORTED_INSTRUMENTS: List[str] = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]

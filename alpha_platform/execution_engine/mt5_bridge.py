@@ -45,6 +45,24 @@ class MT5ExecutionBridge:
         return symbol
 
     async def connect(self) -> bool:
+        # First, try without credentials (use already-open MT5 Terminal session)
+        if HAS_MT5_LIB:
+            logger.info("Connecting to already-open MT5 Terminal session...")
+            initialized = mt5.initialize()
+            if initialized:
+                acc = mt5.account_info()
+                if acc is not None:
+                    self.login = acc.login
+                    self.server = acc.server
+                    self.connected = True
+                    logger.info(f"MetaTrader 5 Bridge CONNECTED to existing terminal: account {acc.login} on {acc.server}")
+                    return True
+                else:
+                    logger.warning(f"MT5 initialized but no account info: {mt5.last_error()}")
+            else:
+                logger.warning(f"MT5 initialize() without credentials failed: {mt5.last_error()}")
+
+        # Fallback: try direct login (when running headless)
         if HAS_MT5_LIB and self.login and self.password:
             logger.info(f"Attempting direct MT5 login for account {self.login} on {self.server}...")
             initialized = mt5.initialize(

@@ -36,6 +36,14 @@ class SystemHealthMonitor:
     def __init__(self):
         self.start_time = time.time()
         self.process = psutil.Process(os.getpid()) if HAS_PSUTIL else None
+        # Prime psutil.cpu_percent() with a blocking call so subsequent
+        # non-blocking calls return a real value (psutil returns 0.0 for the
+        # first call when interval=None on Windows / Linux).
+        if HAS_PSUTIL and self.process is not None:
+            try:
+                self.process.cpu_percent(interval=0.05)
+            except Exception:
+                pass
 
     def get_uptime_seconds(self) -> float:
         return time.time() - self.start_time
@@ -55,6 +63,7 @@ class SystemHealthMonitor:
 
         if HAS_PSUTIL and self.process:
             try:
+                # Non-blocking read (uses last primed sample)
                 cpu_pct = self.process.cpu_percent(interval=None)
                 mem_info = self.process.memory_info()
                 mem_mb = mem_info.rss / (1024 * 1024)
