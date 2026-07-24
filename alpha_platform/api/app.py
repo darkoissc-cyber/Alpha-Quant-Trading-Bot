@@ -27,7 +27,16 @@ validation_gate = StatisticalValidationGate()
 stress_engine = StressTestingEngine()
 execution_tracker = ExecutionQualityTracker()
 ts_store = TimeSeriesDataStore("time_series_data.db")
-mt5_bridge = MT5ExecutionBridge(allow_simulation=False)
+# Auto-enable simulation mode on platforms where the MetaTrader5 native
+# library is unavailable (Linux/Docker/Render). On Windows desktop with
+# MT5 installed, the real broker will be used automatically.
+import platform as _platform
+import os as _os
+_mt5_sim = (
+    _platform.system() != "Windows"
+    or _os.getenv("ENABLE_MT5_SIMULATION", "true").lower() == "true"
+)
+mt5_bridge = MT5ExecutionBridge(allow_simulation=_mt5_sim)
 strategy_runner = StrategyRunner(
     data_store=ts_store,
     risk_engine=risk_engine,
