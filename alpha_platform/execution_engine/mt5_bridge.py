@@ -172,10 +172,38 @@ class MT5ExecutionBridge:
                 }
                 res = mt5.order_send(req)
                 if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                    telegram_notifier.notify_trade_closed(pos.symbol, pos.profit, 0.0)
+                    pips = self._calc_pips(pos.symbol, pos.price_open, res.price, pos.type)
+                    telegram_notifier.notify_trade_closed(pos.symbol, pos.profit, pips)
                     return {"status": "CLOSED", "ticket": ticket, "close_price": res.price, "profit": pos.profit}
-        telegram_notifier.notify_trade_closed("XAUUSD", -5.00, -20.0)
-        return {"status": "SIMULATED_CLOSED", "ticket": ticket, "profit": 0.22}
+                else:
+                    reason = res.comment if res else "Unknown MT5 close error"
+                    logger.error(f"MT5 close position #{ticket} failed: {reason}")
+                    telegram_notifier.notify_risk_alert(
+                        "فشل إغلاق الصفقة",
+                        f"تعذر إغلاق الصفقة رقم {ticket} على {pos.symbol}: {reason}"
+                    )
+                    return {"status": "REJECTED", "reason": reason}
+
+        # Simulation fallback: no live MT5 — do NOT send a fake Telegram alert
+        # with hard-coded symbol/profit. Just log and return a simulated result.
+        logger.info(f"[Simulation] Closing position #{ticket} (no live MT5 session)")
+        return {"status": "SIMULATED_CLOSED", "ticket": ticket, "profit": 0.0}
+
+    def _calc_pips(self, symbol: str, open_price: float, close_price: float, pos_type: int) -> float:
+        """Best-effort pips calculation. Used for Telegram notifications only."""
+        try:
+            # Crude convention: 1 pip = 0.01 for XAU-like gold, 1.0 for BTC, 0.0001 for FX
+            sym = symbol.upper()
+            if "XAU" in sym:
+                pip_unit = 0.01
+            elif "BTC" in sym:
+                pip_unit = 1.0
+            else:
+                pip_unit = 0.0001
+            direction = 1 if pos_type == 0 else -1  # mt5.POSITION_TYPE_BUY == 0
+            return round((close_price - open_price) / pip_unit * direction, 1)
+        except Exception:
+            return 0.0
 
     async def modify_order_sltp(self, ticket: int, sl: float, tp: float) -> Dict[str, Any]:
         """Modifies Stop-Loss and Take-Profit of an open position on MT5 server."""
