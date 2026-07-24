@@ -249,6 +249,11 @@ class NewsFilter:
         self._last_refresh: Optional[datetime] = None
         self._provider_failed: bool = False
 
+    def inject_events(self, events: List[NewsEvent]):
+        with self._lock:
+            self._cached_events = events
+            self._last_refresh = datetime.now(timezone.utc)
+
     def refresh_events_if_needed(self, force: bool = False):
         now = datetime.now(timezone.utc)
         refresh_interval_sec = settings.NEWS_REFRESH_INTERVAL_MINUTES * 60

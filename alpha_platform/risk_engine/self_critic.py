@@ -88,12 +88,19 @@ class InstitutionalSelfCriticValidator:
         candidate.composite_score = score
         candidate.quality_grade = grade
 
-        # Self-Critic Adversarial Vetoes
+        # Self-Critic Hard Vetoes
+        # Hard Veto 0: Minimum AI Conviction Guard (ai_calibrated_prob >= 0.50)
+        if ai_calibrated_prob < 0.50:
+            justification = f"REJECTED [AI Conviction Guard]: AI probability ({ai_calibrated_prob:.2f}) is below minimum threshold (0.50)."
+            candidate.self_critic_justification = justification
+            logger.info(f"[Self-Critic Veto] {candidate.candidate_id}: {justification}")
+            return False, score, "C", justification
+
         # Veto 1: Reject B and C grade setups (Only A+ trade setups allowed)
         if grade != "A+":
             justification = f"REJECTED [Grade {grade} Score {score:.0f}/100]: Setup quality is below A+ institutional threshold ({self.min_composite_score}). Flaws: {', '.join(critique_notes)}"
             candidate.self_critic_justification = justification
-            logger.info(f"🛡️ [Self-Critic Veto] {candidate.candidate_id}: {justification}")
+            logger.info(f"[Self-Critic Veto] {candidate.candidate_id}: {justification}")
             return False, score, grade, justification
 
         # Veto 2: Strict One Position Per Symbol Guard
@@ -101,7 +108,7 @@ class InstitutionalSelfCriticValidator:
             if pos.get("symbol") == candidate.symbol:
                 justification = f"REJECTED [One Position Per Symbol Guard]: Active position already exists on {candidate.symbol}. Multiple simultaneous trades on the same symbol are strictly prohibited."
                 candidate.self_critic_justification = justification
-                logger.info(f"🛡️ [Self-Critic Veto] {candidate.candidate_id}: {justification}")
+                logger.info(f"[Self-Critic Veto] {candidate.candidate_id}: {justification}")
                 return False, score, grade, justification
 
         # Veto 3: Recent Loss Streak Protection (Revenge Trading Guard)
@@ -109,10 +116,10 @@ class InstitutionalSelfCriticValidator:
             if ai_calibrated_prob < 0.65:
                 justification = f"REJECTED [Revenge Trade Guard]: Recent loss streak detected. Requires AI conviction >= 0.65 (Current: {ai_calibrated_prob:.2f})."
                 candidate.self_critic_justification = justification
-                logger.info(f"🛡️ [Self-Critic Veto] {candidate.candidate_id}: {justification}")
+                logger.info(f"[Self-Critic Veto] {candidate.candidate_id}: {justification}")
                 return False, score, grade, justification
 
         justification = f"APPROVED [Grade A+ Score {score:.0f}/100]: High-conviction setup passed all institutional gates ({', '.join(reasons)})"
         candidate.self_critic_justification = justification
-        logger.info(f"✅ [Self-Critic Approval] {candidate.candidate_id}: {justification}")
+        logger.info(f"[Self-Critic Approval] {candidate.candidate_id}: {justification}")
         return True, score, grade, justification
