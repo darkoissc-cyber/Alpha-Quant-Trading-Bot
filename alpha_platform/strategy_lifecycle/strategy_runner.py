@@ -13,6 +13,7 @@ real orders fire. If disabled, the loop still runs and logs candidates,
 which is useful for paper-trading and verification on the cloud.
 """
 import asyncio
+import os
 import random
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple
@@ -46,6 +47,7 @@ class StrategyRunner:
         interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
         max_orders_per_cycle: int = 1,
         meta_labeler: Optional[Any] = None,
+        signals_only_mode: bool = False,
     ):
         self.data_store = data_store
         self.risk_engine = risk_engine
@@ -55,6 +57,13 @@ class StrategyRunner:
         # Optional real meta-labeler; if absent, the AI gate is honestly
         # bypassed (logged) rather than being silently replaced by a constant.
         self.meta_labeler = meta_labeler
+        # Signals-only mode: skip broker dispatch and only push approved
+        # candidates to Telegram. The trader executes the trade manually
+        # in their MT5 terminal. Default: False (auto-execute on broker).
+        self.signals_only_mode = bool(
+            signals_only_mode
+            or os.getenv("AUTO_TRADE_SIGNALS_ONLY", "false").lower() in ("1", "true", "yes")
+        )
 
         self.strategies = [
             TrendFollowingStrategy(),
@@ -304,6 +313,51 @@ class StrategyRunner:
 
         self.last_approved_count = len(approved)
 
+        # ----------------------------------------------------------------
+        # SIGNALS-ONLY MODE: push approved candidates to Telegram only,
+        # skip broker dispatch entirely. The trader executes manually
+        # in their MT5 terminal. This is the default on Render / cloud
+        # environments where the bot cannot reach a real broker.
+        # ----------------------------------------------------------------
+        if self.signals_only_mode:
+            signals_sent = 0
+            try:
+                from alpha_platform.core.telegram_notifier import telegram_notifier
+                for c in approved[: self.max_orders_per_cycle]:
+                    rr = abs(c.take_profit - c.entry_price) / max(1e-5, abs(c.entry_price - c.stop_loss))
+                    text = (
+                        f"🚨 *إشارة جديدة / NEW SIGNAL* (cycle {cycle_id})\n\n"
+                        f"• {c.strategy_id}\n"
+                        f"• {c.symbol} — *{c.signal_type.name}*\n"
+                        f"• Entry: `{c.entry_price:.4f}`\n"
+                        f"• SL: `{c.stop_loss:.4f}`\n"
+                        f"• TP: `{c.take_profit:.4f}`\n"
+                        f"• R:R = {rr:.2f}\n"
+                        f"• Grade: {c.quality_grade or 'A+'} | Score: {c.composite_score:.0f}/100\n\n"
+                        f"⏱ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                    )
+                    if telegram_notifier.is_configured() and telegram_notifier.send_message_sync(text):
+                        signals_sent += 1
+                        # Cooldown to prevent over-signalling on the same symbol
+                        self.symbol_cooldowns[c.symbol] = datetime.now(timezone.utc) + timedelta(minutes=15)
+            except Exception as sig_err:
+                logger.error(f"[StrategyRunner] signals-only notification error: {sig_err}")
+            self.last_executed_count = signals_sent
+            logger.info(
+                f"[StrategyRunner] cycle={cycle_id} SIGNALS-ONLY: "
+                f"{len(approved)} approved, {signals_sent} pushed to Telegram"
+            )
+            await self._check_and_apply_breakeven()
+            await self._sync_and_notify_closed_positions()
+            return {
+                "cycle": cycle_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "candidates": len(candidates),
+                "approved": len(approved),
+                "executed": signals_sent,
+                "mode": "signals_only",
+            }
+
         executed = 0
         if self.broker is not None:
             for c in approved[: self.max_orders_per_cycle]:
@@ -340,12 +394,32 @@ class StrategyRunner:
         logger.info(
             f"[StrategyRunner] Starting loop. interval={self.interval_seconds}s "
             f"broker={'yes' if self.broker else 'no'} "
+            f"signals_only={self.signals_only_mode} "
             f"strategies={[s.strategy_id for s in self.strategies]}"
         )
+        # Send a single boot-up Telegram message so the user can confirm the
+        # bot is alive and the credentials are wired correctly.
+        try:
+            from alpha_platform.core.telegram_notifier import telegram_notifier
+            if telegram_notifier.is_configured():
+                mode = "SIGNALS-ONLY" if self.signals_only_mode else "AUTO-EXECUTE"
+                boot_text = (
+                    f"🤖 *Alpha Quant Online*\n\n"
+                    f"• Mode: *{mode}*\n"
+                    f"• Strategies: 3 (Trend / Breakout / Mean-Rev)\n"
+                    f"• Symbols: XAUUSD, EURUSD, GBPUSD, BTCUSD\n"
+                    f"• Cycle: every {self.interval_seconds}s\n"
+                    f"• Started: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+                    f"You will receive a signal here every time an A+ setup is approved."
+                )
+                telegram_notifier.send_message_sync(boot_text)
+        except Exception as boot_err:
+            logger.warning(f"[StrategyRunner] boot-up Telegram message failed: {boot_err}")
+
         while self._running:
             try:
                 summary = await self.run_once()
-                if summary["candidates"] or summary["executed"]:
+                if summary.get("candidates") or summary.get("executed"):
                     logger.info(f"[StrategyRunner] cycle summary: {summary}")
             except asyncio.CancelledError:
                 logger.info("[StrategyRunner] Stopping (cancelled).")

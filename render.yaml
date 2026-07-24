@@ -30,3 +30,8 @@ services:
         sync: false
       - key: BROKER_NAME
         value: "Exness MT5"
+      # Run the engine in signals-only mode: no simulated orders,
+      # only Telegram notifications of approved setups. Operator
+      # executes the trade manually in their MT5 terminal.
+      - key: AUTO_TRADE_SIGNALS_ONLY
+        value: "true"

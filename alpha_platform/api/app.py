@@ -43,6 +43,7 @@ strategy_runner = StrategyRunner(
     broker=mt5_bridge,
     interval_seconds=30,
     max_orders_per_cycle=1,
+    signals_only_mode=_os.getenv("AUTO_TRADE_SIGNALS_ONLY", "true").lower() in ("1", "true", "yes"),
 )
 
 def seed_historical_bars_if_needed():
@@ -429,6 +430,47 @@ def send_heartbeat_notification():
         active_positions=portfolio["active_positions_count"]
     )
     return {"status": "SUCCESS", "telegram_sent": success, "portfolio": portfolio}
+
+@app.post("/api/signals/notify")
+def send_custom_signal(
+    symbol: str = "XAUUSD",
+    signal_type: str = "BUY",
+    entry_price: float = 0.0,
+    stop_loss: float = 0.0,
+    take_profit: float = 0.0,
+    note: str = ""
+):
+    """
+    Manually push a custom trading signal to Telegram.
+    Useful when the operator wants to broadcast a setup the strategy
+    engine didn't pick up, or when running the engine in observation mode.
+    """
+    rr = abs(take_profit - entry_price) / max(1e-5, abs(entry_price - stop_loss)) if stop_loss and entry_price else 0.0
+    text = (
+        f"📣 *إشارة يدوية / MANUAL SIGNAL*\n\n"
+        f"• {symbol} — *{signal_type.upper()}*\n"
+        f"• Entry: `{entry_price}`\n"
+        f"• SL: `{stop_loss}`\n"
+        f"• TP: `{take_profit}`\n"
+        f"• R:R = {rr:.2f}\n"
+        + (f"\n• Note: {note}\n" if note else "")
+        + f"\n⏱ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
+    sent = telegram_notifier.send_message_sync(text)
+    return {"status": "OK" if sent else "FAILED", "telegram_sent": sent, "rr": rr}
+
+@app.post("/api/bot/test-message")
+def send_test_telegram_message(message: str = "✅ Alpha Quant test message: bot is alive and configured."):
+    """
+    Send a free-form test message to the configured Telegram chat. Use this
+    to confirm the bot token + chat id are wired correctly after deployment.
+    """
+    sent = telegram_notifier.send_message_sync(message)
+    return {
+        "status": "OK" if sent else "FAILED",
+        "telegram_sent": sent,
+        "configured": telegram_notifier.is_configured(),
+    }
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
