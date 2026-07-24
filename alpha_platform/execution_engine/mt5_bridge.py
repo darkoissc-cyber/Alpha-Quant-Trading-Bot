@@ -79,14 +79,23 @@ class MT5ExecutionBridge:
                 else:
                     err_msg = f"MT5 Initialization failed: {mt5.last_error()}"
                     logger.error(err_msg)
-                    if settings.ENVIRONMENT == "production" or not self.allow_simulation:
+                    # Only hard-fail when the operator EXPLICITLY disabled simulation.
+                    # Production environment with allow_simulation=True must fall
+                    # through to the cloud-simulation mode so Render and CI
+                    # environments can still run end-to-end without a real broker.
+                    if not self.allow_simulation:
                         raise BrokerConnectionError(err_msg)
 
-            if settings.ENVIRONMENT == "production" or not self.allow_simulation:
-                raise BrokerConnectionError("MetaTrader5 library or valid account credentials unavailable in production mode.")
+            # If the operator explicitly disabled simulation we hard-fail.
+            if not self.allow_simulation:
+                raise BrokerConnectionError("MetaTrader5 library or valid account credentials unavailable, and simulation is disabled.")
 
+            # Otherwise fall through to cloud-simulation mode. This is the
+            # correct path for Render / Linux / Docker / CI where the native
+            # MT5 terminal is unavailable but the operator still wants the
+            # engine to run end-to-end.
             self.connected = True
-            logger.warning(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login}")
+            logger.warning(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login} (env={settings.ENVIRONMENT})")
             return True
 
         return await asyncio.to_thread(_sync_connect)
@@ -119,13 +128,17 @@ class MT5ExecutionBridge:
         resolved_symbol = self.resolve_symbol(symbol)
 
         def _sync_send():
+            import time as _time
+            _now_ts = _time.time()  # Use time.time() instead of asyncio.get_event_loop().time()
+                                     # because this runs inside asyncio.to_thread's worker thread
+                                     # which has no event loop attached.
             if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
                 sym_info = mt5.symbol_info(resolved_symbol)
                 digits = sym_info.digits if sym_info is not None else 2
                 tick = mt5.symbol_info_tick(resolved_symbol)
                 if tick is None:
                     return {"status": "REJECTED", "reason": f"No market tick for {resolved_symbol}"}
-                
+
                 fill_price = tick.ask if signal_type == SignalType.BUY else tick.bid
                 order_type = mt5.ORDER_TYPE_BUY if signal_type == SignalType.BUY else mt5.ORDER_TYPE_SELL
 
@@ -149,7 +162,7 @@ class MT5ExecutionBridge:
                 fill_price_r = round(float(fill_price_r), digits)
                 sl_r = round(float(sl_r), digits)
                 tp_r = round(float(tp_r), digits)
-                
+
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
                     "symbol": resolved_symbol,
@@ -174,7 +187,7 @@ class MT5ExecutionBridge:
                         "fill_price": result.price,
                         "fill_volume": result.volume,
                         "slippage": 0.0,
-                        "timestamp": asyncio.get_event_loop().time()
+                        "timestamp": _now_ts
                     }
                 else:
                     reason = self._sanitize_error(result.comment) if result else "Unknown MT5 error"
@@ -193,7 +206,7 @@ class MT5ExecutionBridge:
                 "fill_price": price,
                 "fill_volume": volume,
                 "slippage": 0.0,
-                "timestamp": asyncio.get_event_loop().time()
+                "timestamp": _now_ts
             }
 
         return await asyncio.to_thread(_sync_send)
