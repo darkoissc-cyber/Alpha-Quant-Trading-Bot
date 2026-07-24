@@ -111,10 +111,10 @@ class ForexFactoryNewsProvider(BaseNewsProvider):
     def fetch_events(self) -> List[NewsEvent]:
         now = datetime.now(timezone.utc)
         
-        # 1. Return memory-cached events if TTL is still valid
+        # 1. Return memory-cached events if TTL is still valid (15 minutes)
         if ForexFactoryNewsProvider._shared_cache_time is not None:
             elapsed = (now - ForexFactoryNewsProvider._shared_cache_time).total_seconds()
-            if elapsed < ForexFactoryNewsProvider._cache_ttl_seconds and ForexFactoryNewsProvider._shared_cache_events:
+            if elapsed < ForexFactoryNewsProvider._cache_ttl_seconds:
                 return ForexFactoryNewsProvider._shared_cache_events
 
         # 2. Try fetching live data from network
@@ -126,6 +126,9 @@ class ForexFactoryNewsProvider(BaseNewsProvider):
                 ForexFactoryNewsProvider._shared_cache_time = now
                 self._save_disk_cache(raw_data)
                 return events
+
+        # Set backoff cache time so we do not hammer the server every cycle on failure/HTTP 429
+        ForexFactoryNewsProvider._shared_cache_time = now
 
         # 3. Memory cache fallback
         if ForexFactoryNewsProvider._shared_cache_events:
@@ -139,10 +142,8 @@ class ForexFactoryNewsProvider(BaseNewsProvider):
             if events:
                 logger.info(f"[NewsFilter] Loaded {len(events)} calendar events from disk cache ({self.DISK_CACHE_PATH}).")
                 ForexFactoryNewsProvider._shared_cache_events = events
-                ForexFactoryNewsProvider._shared_cache_time = now
                 return events
 
-        logger.warning("[NewsFilter] Failed to fetch news data and no disk cache available.")
         return []
 
     def _save_disk_cache(self, raw_data: List[Dict]):
