@@ -96,16 +96,13 @@ class InstitutionalSelfCriticValidator:
             logger.info(f"🛡️ [Self-Critic Veto] {candidate.candidate_id}: {justification}")
             return False, score, grade, justification
 
-        # Veto 2: Anti-Stacking & Correlation Veto
+        # Veto 2: Strict One Position Per Symbol Guard
         for pos in active_positions:
             if pos.get("symbol") == candidate.symbol:
-                pos_type = pos.get("type", 0)
-                cand_type = 0 if candidate.signal_type == SignalType.BUY else 1
-                if pos_type == cand_type:
-                    justification = f"REJECTED [Anti-Stacking Veto]: Active position already exists on {candidate.symbol} in direction {candidate.signal_type.name}."
-                    candidate.self_critic_justification = justification
-                    logger.info(f"🛡️ [Self-Critic Veto] {candidate.candidate_id}: {justification}")
-                    return False, score, grade, justification
+                justification = f"REJECTED [One Position Per Symbol Guard]: Active position already exists on {candidate.symbol}. Multiple simultaneous trades on the same symbol are strictly prohibited."
+                candidate.self_critic_justification = justification
+                logger.info(f"🛡️ [Self-Critic Veto] {candidate.candidate_id}: {justification}")
+                return False, score, grade, justification
 
         # Veto 3: Recent Loss Streak Protection (Revenge Trading Guard)
         if len(recent_trade_results) >= 2 and sum(recent_trade_results[-2:]) < 0:
