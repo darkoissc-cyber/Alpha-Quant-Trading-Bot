@@ -63,6 +63,9 @@ class StrategyRunner:
         self.last_approved_count = 0
         self.last_executed_count = 0
         self.tracked_positions: Dict[int, Dict[str, Any]] = {}
+        self.symbol_cooldowns: Dict[str, datetime] = {}
+        from alpha_platform.risk_engine.self_critic import InstitutionalSelfCriticValidator
+        self.self_critic = InstitutionalSelfCriticValidator(min_composite_score=75.0)
         self._running = False
 
     def set_broker(self, broker: MT5ExecutionBridge) -> None:
@@ -77,7 +80,14 @@ class StrategyRunner:
 
     def _gather_candidates(self) -> List[TradeCandidate]:
         candidates: List[TradeCandidate] = []
+        now = datetime.now(timezone.utc)
         for symbol in SUPPORTED_SYMBOLS:
+            cooldown_until = self.symbol_cooldowns.get(symbol)
+            if cooldown_until and now < cooldown_until:
+                remaining_sec = int((cooldown_until - now).total_seconds())
+                logger.debug(f"[StrategyRunner] Skipping {symbol}: Symbol Cooldown Active ({remaining_sec}s remaining)")
+                continue
+
             bars = self._load_bars(symbol)
             if len(bars) < MIN_BARS_REQUIRED:
                 logger.debug(f"[StrategyRunner] Skipping {symbol}: only {len(bars)} bars (need {MIN_BARS_REQUIRED})")
@@ -93,13 +103,15 @@ class StrategyRunner:
 
     def _evaluate_risk(self, candidate: TradeCandidate):
         try:
+            active_positions = list(self.tracked_positions.values())
             return self.risk_engine.evaluate_candidate(
                 symbol=candidate.symbol,
                 current_equity=getattr(self.risk_engine, "peak_equity", 10000.0) or 10000.0,
                 proposed_volume=0.01,
                 entry_price=candidate.entry_price,
                 stop_loss=candidate.stop_loss,
-                current_spread_pips=10.0,
+                current_spread_pips=1.5 if "USD" in candidate.symbol and "XAU" not in candidate.symbol else 15.0,
+                active_positions=active_positions
             )
         except Exception as e:
             logger.error(f"[StrategyRunner] Risk eval failed for {candidate.candidate_id}: {e}")
@@ -208,13 +220,27 @@ class StrategyRunner:
                 )
 
         approved: List[TradeCandidate] = []
+        active_pos_list = list(self.tracked_positions.values())
+        from datetime import timedelta
+
         for c in candidates:
-            verdict = self._evaluate_risk(c)
-            if verdict and getattr(verdict, "passed", False):
-                logger.info(f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine.")
-                approved.append(c)
+            risk_verdict = self._evaluate_risk(c)
+            if risk_verdict and getattr(risk_verdict, "passed", False):
+                # Dual Validator Pass: Institutional Self-Critic Gate
+                sc_ok, score, grade, justification = self.self_critic.evaluate_and_critique(
+                    candidate=c,
+                    ai_calibrated_prob=0.60,
+                    current_spread_pips=1.5 if "USD" in c.symbol and "XAU" not in c.symbol else 15.0,
+                    active_positions=active_pos_list,
+                    recent_trade_results=[]
+                )
+                if sc_ok:
+                    logger.info(f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine & Self-Critic [Grade {grade}, Score {score:.0f}/100].")
+                    approved.append(c)
+                else:
+                    logger.info(f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Self-Critic: {justification}")
             else:
-                reason = getattr(verdict, "rejection_reason", "Risk verdict failed or undefined") if verdict else "Risk evaluation returned None"
+                reason = getattr(risk_verdict, "rejection_reason", "Risk verdict failed or undefined") if risk_verdict else "Risk evaluation returned None"
                 logger.info(f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Risk Engine: {reason}")
 
         self.last_approved_count = len(approved)
@@ -225,9 +251,11 @@ class StrategyRunner:
                 result = await self._execute(c)
                 if result and result.get("status") in ("FILLED", "SIMULATED_FILLED"):
                     executed += 1
+                    # Trigger 15-minute symbol cooldown to prevent overtrading & price chasing
+                    self.symbol_cooldowns[c.symbol] = datetime.now(timezone.utc) + timedelta(minutes=15)
                     logger.info(
                         f"[StrategyRunner] cycle={cycle_id} EXECUTED {c.signal_type.name} {c.symbol} "
-                        f"@ {c.entry_price:.4f} ticket={result.get('broker_ticket')}"
+                        f"@ {c.entry_price:.4f} ticket={result.get('broker_ticket')} (15-min cooldown activated)"
                     )
                 else:
                     reason = result.get("reason", "Unknown execution failure") if result else "Execution returned None"

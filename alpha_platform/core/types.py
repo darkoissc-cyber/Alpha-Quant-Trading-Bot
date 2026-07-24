@@ -77,6 +77,9 @@ class TradeCandidate:
     holding_period_bars: int
     confidence_score: float
     features_snapshot: Dict[str, float] = field(default_factory=dict)
+    composite_score: float = 0.0
+    quality_grade: str = "C"
+    self_critic_justification: str = ""
 
 @dataclass
 class MetaLabelResult:

@@ -106,21 +106,41 @@ class RiskEngine:
                 hard_limit_exceeded=False
             )
 
-        # 4. Correlation Matrix Veto Check
-        if active_positions and correlation_matrix is not None and not correlation_matrix.empty:
-            corr_ok, corr_reason = self.correlation_engine.is_exposure_allowed(
-                proposed_symbol=symbol,
-                active_positions=active_positions,
-                correlation_matrix=correlation_matrix
-            )
-            if not corr_ok:
+        # 4. Correlation Matrix & Portfolio Heat Veto Check
+        if active_positions:
+            if len(active_positions) >= 2:
                 return RiskCheckResult(
                     passed=False,
-                    veto_reason=f"Correlation Veto: {corr_reason}",
+                    veto_reason=f"Portfolio Heat Guard Veto: Maximum 2 simultaneous active positions allowed ({len(active_positions)} active).",
                     scaled_position_size=0.0,
                     soft_limit_exceeded=False,
                     hard_limit_exceeded=False
                 )
+
+            for pos in active_positions:
+                if pos.get("symbol") == symbol:
+                    return RiskCheckResult(
+                        passed=False,
+                        veto_reason=f"Anti-Stacking Veto: Active position already open on {symbol}.",
+                        scaled_position_size=0.0,
+                        soft_limit_exceeded=False,
+                        hard_limit_exceeded=False
+                    )
+
+            if correlation_matrix is not None and not correlation_matrix.empty:
+                corr_ok, corr_reason = self.correlation_engine.is_exposure_allowed(
+                    proposed_symbol=symbol,
+                    active_positions=active_positions,
+                    correlation_matrix=correlation_matrix
+                )
+                if not corr_ok:
+                    return RiskCheckResult(
+                        passed=False,
+                        veto_reason=f"Correlation Veto: {corr_reason}",
+                        scaled_position_size=0.0,
+                        soft_limit_exceeded=False,
+                        hard_limit_exceeded=False
+                    )
 
         # 5. Soft Daily Loss Check (1.5% Limit -> De-risk position size by 50%)
         daily_dd_pct = (self.day_start_equity - current_equity) / self.day_start_equity * 100.0 if self.day_start_equity > 0 else 0.0
