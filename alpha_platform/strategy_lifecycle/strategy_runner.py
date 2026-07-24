@@ -122,6 +122,41 @@ class StrategyRunner:
             logger.error(f"[StrategyRunner] Execution failed for {candidate.candidate_id}: {e}")
             return None
 
+    async def _check_and_apply_breakeven(self) -> None:
+        if self.broker is None:
+            return
+        try:
+            positions = await self.broker.get_active_positions()
+            if not positions:
+                return
+            
+            for pos in positions:
+                ticket = pos.get("ticket")
+                profit = pos.get("profit", 0.0)
+                # Trigger Break-Even once open trade profit exceeds $0.50
+                if profit > 0.50:
+                    open_price = pos.get("price_open")
+                    current_sl = pos.get("sl", 0.0)
+                    pos_type = pos.get("type", 0) # 0: BUY, 1: SELL
+                    
+                    need_be = False
+                    if pos_type == 0 and (current_sl < open_price or current_sl == 0.0):
+                        need_be = True
+                    elif pos_type == 1 and (current_sl > open_price or current_sl == 0.0):
+                        need_be = True
+                        
+                    if need_be and open_price:
+                        res = await self.broker.modify_order_sltp(ticket=ticket, sl=open_price, tp=pos.get("tp", 0.0))
+                        if res.get("status") in ("MODIFIED", "SIMULATED_MODIFIED"):
+                            logger.info(f"🛡️ [Break-Even] Position #{ticket} ({pos.get('symbol')}) moved to Break-Even at {open_price:.4f}!")
+                            from alpha_platform.core.telegram_notifier import telegram_notifier
+                            telegram_notifier.notify_risk_alert(
+                                "تأمين الصفقة تلقائياً (Break-Even)",
+                                f"تم تحريك إيقاف الخسارة للصفقة #{ticket} على {pos.get('symbol')} إلى سعر الدخول ({open_price:.4f}) لحجز الأرباح وتأمينها بدون مخاطرة!"
+                            )
+        except Exception as e:
+            logger.error(f"[StrategyRunner] Error during Break-Even evaluation: {e}")
+
     async def run_once(self) -> Dict[str, Any]:
         self.cycle_count += 1
         cycle_id = self.cycle_count
@@ -166,6 +201,7 @@ class StrategyRunner:
                 logger.warning(f"[StrategyRunner] cycle={cycle_id}: {len(approved)} approved candidate(s) were NOT executed because broker is None.")
 
         self.last_executed_count = executed
+        await self._check_and_apply_breakeven()
 
         return {
             "cycle": cycle_id,
