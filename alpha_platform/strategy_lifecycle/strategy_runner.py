@@ -255,6 +255,13 @@ class StrategyRunner:
                 if len(self.recent_pnl_window) > 50:
                     self.recent_pnl_window = self.recent_pnl_window[-50:]
 
+                # Instantly release symbol cooldown so the engine is ready for the next trade setup on this symbol!
+                base_sym = symbol.replace("m", "").replace(".c", "")
+                if base_sym in self.symbol_cooldowns:
+                    del self.symbol_cooldowns[base_sym]
+                if symbol in self.symbol_cooldowns:
+                    del self.symbol_cooldowns[symbol]
+
                 del self.tracked_positions[ticket]
                 
             # Update tracked positions with current live positions
@@ -266,6 +273,10 @@ class StrategyRunner:
     async def run_once(self) -> Dict[str, Any]:
         self.cycle_count += 1
         cycle_id = self.cycle_count
+
+        # 1. Run Break-Even management on open positions and sync closed trades FIRST
+        await self._check_and_apply_breakeven()
+        await self._sync_and_notify_closed_positions()
 
         candidates = self._gather_candidates()
         self.last_candidate_count = len(candidates)
@@ -284,13 +295,7 @@ class StrategyRunner:
         for c in candidates:
             risk_verdict = self._evaluate_risk(c)
             if risk_verdict and getattr(risk_verdict, "passed", False):
-                # Dual Validator Pass: Institutional Self-Critic Gate.
-                # CRITICAL FIX: previously the AI probability was hard-coded
-                # to 0.60 and the trained meta-labeler was never consulted.
-                # Now we call the real model if it has been wired in; if not,
-                # we log a warning so the operator can see the gap.
                 ai_prob, ai_real = self._get_ai_calibrated_prob(c)
-                # Pass recent realised P&L so the Revenge-Trade Guard works
                 sc_ok, score, grade, justification = self.self_critic.evaluate_and_critique(
                     candidate=c,
                     ai_calibrated_prob=ai_prob,
@@ -313,17 +318,35 @@ class StrategyRunner:
 
         self.last_approved_count = len(approved)
 
+        # Per-Symbol Selection: Group approved candidates by symbol and pick the single BEST candidate for each symbol
+        symbol_best_map: Dict[str, TradeCandidate] = {}
+        for c in approved:
+            sym = c.symbol
+            if sym not in symbol_best_map:
+                symbol_best_map[sym] = c
+            else:
+                curr_score = getattr(c, "composite_score", 0.0)
+                prev_score = getattr(symbol_best_map[sym], "composite_score", 0.0)
+                if curr_score > prev_score:
+                    symbol_best_map[sym] = c
+
+        selected_candidates = list(symbol_best_map.values())
+        selected_candidates.sort(
+            key=lambda c: (
+                getattr(c, "composite_score", 0.0),
+                abs(c.take_profit - c.entry_price) / max(1e-5, abs(c.entry_price - c.stop_loss))
+            ),
+            reverse=True
+        )
+
         # ----------------------------------------------------------------
-        # SIGNALS-ONLY MODE: push approved candidates to Telegram only,
-        # skip broker dispatch entirely. The trader executes manually
-        # in their MT5 terminal. This is the default on Render / cloud
-        # environments where the bot cannot reach a real broker.
+        # SIGNALS-ONLY MODE
         # ----------------------------------------------------------------
         if self.signals_only_mode:
             signals_sent = 0
             try:
                 from alpha_platform.core.telegram_notifier import telegram_notifier
-                for c in approved[: self.max_orders_per_cycle]:
+                for c in selected_candidates:
                     rr = abs(c.take_profit - c.entry_price) / max(1e-5, abs(c.entry_price - c.stop_loss))
                     text = (
                         f"🚨 *إشارة جديدة / NEW SIGNAL* (cycle {cycle_id})\n\n"
@@ -338,17 +361,10 @@ class StrategyRunner:
                     )
                     if telegram_notifier.is_configured() and telegram_notifier.send_message_sync(text):
                         signals_sent += 1
-                        # Cooldown to prevent over-signalling on the same symbol
                         self.symbol_cooldowns[c.symbol] = datetime.now(timezone.utc) + timedelta(minutes=15)
             except Exception as sig_err:
                 logger.error(f"[StrategyRunner] signals-only notification error: {sig_err}")
             self.last_executed_count = signals_sent
-            logger.info(
-                f"[StrategyRunner] cycle={cycle_id} SIGNALS-ONLY: "
-                f"{len(approved)} approved, {signals_sent} pushed to Telegram"
-            )
-            await self._check_and_apply_breakeven()
-            await self._sync_and_notify_closed_positions()
             return {
                 "cycle": cycle_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -360,15 +376,14 @@ class StrategyRunner:
 
         executed = 0
         if self.broker is not None:
-            for c in approved[: self.max_orders_per_cycle]:
+            for c in selected_candidates:
                 result = await self._execute(c)
                 if result and result.get("status") in ("FILLED", "SIMULATED_FILLED"):
                     executed += 1
-                    # Trigger 15-minute symbol cooldown to prevent overtrading & price chasing
                     self.symbol_cooldowns[c.symbol] = datetime.now(timezone.utc) + timedelta(minutes=15)
                     logger.info(
                         f"[StrategyRunner] cycle={cycle_id} EXECUTED {c.signal_type.name} {c.symbol} "
-                        f"@ {c.entry_price:.4f} ticket={result.get('broker_ticket')} (15-min cooldown activated)"
+                        f"@ {c.entry_price:.4f} ticket={result.get('broker_ticket')}"
                     )
                 else:
                     reason = result.get("reason", "Unknown execution failure") if result else "Execution returned None"

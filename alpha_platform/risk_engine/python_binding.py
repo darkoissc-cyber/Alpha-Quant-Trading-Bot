@@ -108,24 +108,52 @@ class RiskEngine:
 
         # 4. Correlation Matrix & Portfolio Heat Veto Check
         if active_positions:
-            if len(active_positions) >= 2:
+            if len(active_positions) >= 4:
                 return RiskCheckResult(
                     passed=False,
-                    veto_reason=f"Portfolio Heat Guard Veto: Maximum 2 simultaneous active positions allowed ({len(active_positions)} active).",
+                    veto_reason=f"Portfolio Heat Guard Veto: Maximum 4 simultaneous active positions allowed ({len(active_positions)} active).",
                     scaled_position_size=0.0,
                     soft_limit_exceeded=False,
                     hard_limit_exceeded=False
                 )
 
             for pos in active_positions:
-                if pos.get("symbol") == symbol:
-                    return RiskCheckResult(
-                        passed=False,
-                        veto_reason=f"Anti-Stacking Veto: Active position already open on {symbol}.",
-                        scaled_position_size=0.0,
-                        soft_limit_exceeded=False,
-                        hard_limit_exceeded=False
-                    )
+                pos_sym = pos.get("symbol", "")
+                if pos_sym == symbol or f"{symbol}m" in pos_sym or symbol in pos_sym:
+                    # Check Pyramiding / Scale-In Governance:
+                    # Allow a secondary trade on the same symbol ONLY IF the existing trade is already secured at Break-Even
+                    open_px = float(pos.get("price_open", 0.0) or pos.get("open_price", 0.0))
+                    sl_px = float(pos.get("sl", 0.0))
+                    profit = float(pos.get("profit", 0.0))
+                    pos_type = pos.get("type", 0)  # 0: BUY, 1: SELL
+
+                    is_secured = False
+                    if profit >= 0.50:
+                        is_secured = True
+                    elif pos_type == 0 and sl_px >= open_px and sl_px > 0:
+                        is_secured = True
+                    elif pos_type == 1 and sl_px <= open_px and sl_px > 0:
+                        is_secured = True
+
+                    if not is_secured:
+                        return RiskCheckResult(
+                            passed=False,
+                            veto_reason=f"Anti-Stacking Veto: Active position on {symbol} is not yet secured at Break-Even.",
+                            scaled_position_size=0.0,
+                            soft_limit_exceeded=False,
+                            hard_limit_exceeded=False
+                        )
+
+                    # Check Distance Filter: Do NOT duplicate the exact entry level of the original trade
+                    min_dist = 1.00 if "XAU" in symbol or "BTC" in symbol else 0.0005
+                    if abs(entry_price - open_px) < min_dist:
+                        return RiskCheckResult(
+                            passed=False,
+                            veto_reason=f"Duplicate Level Veto: Proposed entry {entry_price:.4f} is too close to existing open position @ {open_px:.4f}.",
+                            scaled_position_size=0.0,
+                            soft_limit_exceeded=False,
+                            hard_limit_exceeded=False
+                        )
 
             if correlation_matrix is not None and not correlation_matrix.empty:
                 corr_ok, corr_reason = self.correlation_engine.is_exposure_allowed(
