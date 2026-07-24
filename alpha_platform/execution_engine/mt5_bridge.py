@@ -13,6 +13,8 @@ except ImportError:
     mt5 = None
     HAS_MT5_LIB = False
 
+from alpha_platform.core.telegram_notifier import telegram_notifier
+
 class BrokerConnectionError(Exception):
     """Raised when broker connection fails in live/production mode."""
     pass
@@ -101,6 +103,7 @@ class MT5ExecutionBridge:
             result = mt5.order_send(request)
             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 logger.info(f"REAL ORDER FILLED on Exness MT5! Ticket: {result.order}")
+                telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, result.price, sl, tp)
                 return {
                     "status": "FILLED",
                     "broker_ticket": result.order,
@@ -112,10 +115,12 @@ class MT5ExecutionBridge:
             else:
                 reason = result.comment if result else "Unknown MT5 error"
                 logger.error(f"MT5 Order placement failed: {reason}")
+                telegram_notifier.notify_risk_alert("فشل تنفيذ الصفقة", f"فشل فتح صفقة على {resolved_symbol}: {reason}")
                 return {"status": "REJECTED", "reason": reason}
 
         logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
         await asyncio.sleep(0.05)
+        telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, price, sl, tp)
         return {
             "status": "FILLED",
             "broker_ticket": 474251097,
@@ -149,7 +154,9 @@ class MT5ExecutionBridge:
                 }
                 res = mt5.order_send(req)
                 if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    telegram_notifier.notify_trade_closed(pos.symbol, pos.profit, 0.0)
                     return {"status": "CLOSED", "ticket": ticket, "close_price": res.price, "profit": pos.profit}
+        telegram_notifier.notify_trade_closed("XAUUSD", -5.00, -20.0)
         return {"status": "SIMULATED_CLOSED", "ticket": ticket, "profit": 0.22}
 
     async def modify_order_sltp(self, ticket: int, sl: float, tp: float) -> Dict[str, Any]:
