@@ -100,9 +100,16 @@ class MT5ExecutionBridge:
         resolved_symbol = self.resolve_symbol(symbol)
 
         if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+            sym_info = mt5.symbol_info(resolved_symbol)
+            digits = sym_info.digits if sym_info is not None else 2
             tick = mt5.symbol_info_tick(resolved_symbol)
             fill_price = tick.ask if signal_type == SignalType.BUY else tick.bid
             order_type = mt5.ORDER_TYPE_BUY if signal_type == SignalType.BUY else mt5.ORDER_TYPE_SELL
+            
+            # Round fill price, SL, and TP to broker exact precision
+            fill_price = round(float(fill_price), digits)
+            sl = round(float(sl), digits)
+            tp = round(float(tp), digits)
             
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
