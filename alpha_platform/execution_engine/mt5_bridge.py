@@ -118,10 +118,22 @@ class MT5ExecutionBridge:
                 fill_price = tick.ask if signal_type == SignalType.BUY else tick.bid
                 order_type = mt5.ORDER_TYPE_BUY if signal_type == SignalType.BUY else mt5.ORDER_TYPE_SELL
                 
-                # Round fill price, SL, and TP to broker exact precision
                 fill_price_r = round(float(fill_price), digits)
                 sl_r = round(float(sl), digits)
                 tp_r = round(float(tp), digits)
+
+                # Ensure minimum broker stop distance
+                min_sl_dist = 2.50 if "XAU" in resolved_symbol else (0.00060 if ("EUR" in resolved_symbol or "GBP" in resolved_symbol) else 100.0)
+                if signal_type == SignalType.BUY:
+                    sl_r = min(sl_r, fill_price_r - min_sl_dist)
+                    tp_r = max(tp_r, fill_price_r + (min_sl_dist * 1.5))
+                else:
+                    sl_r = max(sl_r, fill_price_r + min_sl_dist)
+                    tp_r = min(tp_r, fill_price_r - (min_sl_dist * 1.5))
+
+                fill_price_r = round(float(fill_price_r), digits)
+                sl_r = round(float(sl_r), digits)
+                tp_r = round(float(tp_r), digits)
                 
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
