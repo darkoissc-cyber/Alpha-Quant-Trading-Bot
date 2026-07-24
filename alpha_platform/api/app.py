@@ -18,6 +18,7 @@ from alpha_platform.execution_analytics.execution_tracker import ExecutionQualit
 from alpha_platform.feature_store.time_series_db import TimeSeriesDataStore
 from alpha_platform.core.types import Bar, Tick
 from alpha_platform.strategy_lifecycle.strategy_runner import StrategyRunner
+from alpha_platform.execution_engine.mt5_bridge import MT5ExecutionBridge, HAS_MT5_LIB, mt5
 
 # Global Instance State
 risk_engine = RiskEngine(initial_equity=10000.0)
@@ -26,9 +27,11 @@ validation_gate = StatisticalValidationGate()
 stress_engine = StressTestingEngine()
 execution_tracker = ExecutionQualityTracker()
 ts_store = TimeSeriesDataStore("time_series_data.db")
+mt5_bridge = MT5ExecutionBridge(allow_simulation=True)
 strategy_runner = StrategyRunner(
     data_store=ts_store,
     risk_engine=risk_engine,
+    broker=mt5_bridge,
     interval_seconds=30,
     max_orders_per_cycle=1,
 )
@@ -43,21 +46,48 @@ async def run_247_data_collector_loop():
             ticks = []
             bars = []
             
+            mt5_active = HAS_MT5_LIB and mt5_bridge.connected and mt5 is not None and mt5.terminal_info() is not None
+            
             for symbol, base in base_prices.items():
-                noise = random.uniform(-0.0005, 0.0005) * base
-                bid = max(0.01, base + noise)
-                ask = bid + (0.30 if symbol == "XAUUSD" else (0.00015 if "USD" in symbol and "BTC" not in symbol else 10.0))
-                vol = random.uniform(1.0, 50.0)
+                fetched_live = False
+                if mt5_active:
+                    try:
+                        resolved = mt5_bridge.resolve_symbol(symbol)
+                        tick_info = mt5.symbol_info_tick(resolved)
+                        rates = mt5.copy_rates_from_pos(resolved, mt5.TIMEFRAME_M1, 0, 1)
+                        
+                        if tick_info is not None and rates is not None and len(rates) > 0:
+                            r = rates[0]
+                            tick_dt = datetime.fromtimestamp(tick_info.time, tz=timezone.utc)
+                            bar_dt = datetime.fromtimestamp(int(r['time']), tz=timezone.utc)
+                            
+                            t = Tick(symbol, tick_dt, round(float(tick_info.bid), 4), round(float(tick_info.ask), 4), round(float(tick_info.volume), 2))
+                            b = Bar(symbol, bar_dt, round(float(r['open']), 4), round(float(r['high']), 4), round(float(r['low']), 4), round(float(r['close']), 4), round(float(r['tick_volume']), 2), tick_count=int(r['tick_volume']))
+                            
+                            ticks.append(t)
+                            bars.append(b)
+                            base_prices[symbol] = float(tick_info.bid)
+                            fetched_live = True
+                    except Exception as err:
+                        logger.warning(f"Failed to fetch live MT5 tick/bar for {symbol}: {err}")
                 
-                tick = Tick(symbol, now, round(bid, 4), round(ask, 4), round(vol, 2))
-                bar = Bar(symbol, now, round(bid-0.1, 4), round(bid+0.2, 4), round(bid-0.2, 4), round(bid, 4), round(vol*10, 2), tick_count=10)
-                
-                ticks.append(tick)
-                bars.append(bar)
-                base_prices[symbol] = bid  # Random walk simulation
-                
-            ts_store.insert_ticks(ticks)
-            ts_store.insert_candles(bars)
+                if not fetched_live:
+                    noise = random.uniform(-0.0005, 0.0005) * base
+                    bid = max(0.01, base + noise)
+                    ask = bid + (0.30 if symbol == "XAUUSD" else (0.00015 if "USD" in symbol and "BTC" not in symbol else 10.0))
+                    vol = random.uniform(1.0, 50.0)
+                    
+                    tick = Tick(symbol, now, round(bid, 4), round(ask, 4), round(vol, 2))
+                    bar = Bar(symbol, now, round(bid-0.1, 4), round(bid+0.2, 4), round(bid-0.2, 4), round(bid, 4), round(vol*10, 2), tick_count=10)
+                    
+                    ticks.append(tick)
+                    bars.append(bar)
+                    base_prices[symbol] = bid
+                    
+            if ticks:
+                ts_store.insert_ticks(ticks)
+            if bars:
+                ts_store.insert_candles(bars)
             
             # Periodically refresh news filter
             risk_engine.news_filter.refresh_events_if_needed()
@@ -70,16 +100,41 @@ async def run_247_data_collector_loop():
             
         await asyncio.sleep(10)
 
+async def run_247_telegram_heartbeat_loop():
+    logger.info("📱 Starting 24/7 Continuous Telegram Heartbeat Daemon...")
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Hourly heartbeat notification
+            portfolio = get_portfolio_overview()
+            telegram_notifier.notify_portfolio_heartbeat(
+                equity=portfolio["equity"],
+                balance=portfolio["balance"],
+                drawdown_pct=portfolio["current_drawdown_pct"],
+                active_positions=portfolio["active_positions_count"]
+            )
+        except asyncio.CancelledError:
+            logger.info("Stopping 24/7 Telegram Heartbeat Daemon.")
+            break
+        except Exception as e:
+            logger.error(f"Error in 24/7 Telegram heartbeat daemon: {e}")
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        connected = await mt5_bridge.connect()
+        logger.info(f"MT5 Execution Bridge connected: {connected}")
+    except Exception as e:
+        logger.error(f"MT5 Execution Bridge connection error: {e}")
+        
     collector_task = asyncio.create_task(run_247_data_collector_loop())
     strategy_task = asyncio.create_task(strategy_runner.loop())
-    logger.info("StrategyRunner registered in lifespan")
+    telegram_task = asyncio.create_task(run_247_telegram_heartbeat_loop())
+    logger.info("StrategyRunner, MT5Bridge & Telegram 24/7 Daemon registered in lifespan")
     try:
         yield
     finally:
         strategy_runner.stop()
-        for t in (collector_task, strategy_task):
+        for t in (collector_task, strategy_task, telegram_task):
             t.cancel()
             try:
                 await t

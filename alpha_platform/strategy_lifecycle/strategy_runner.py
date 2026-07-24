@@ -128,12 +128,23 @@ class StrategyRunner:
 
         candidates = self._gather_candidates()
         self.last_candidate_count = len(candidates)
+        if candidates:
+            for c in candidates:
+                logger.info(
+                    f"[StrategyRunner] cycle={cycle_id} candidate generated: "
+                    f"{c.strategy_id} -> {c.signal_type.name} {c.symbol} @ {c.entry_price:.4f} "
+                    f"(SL: {c.stop_loss:.4f}, TP: {c.take_profit:.4f})"
+                )
 
         approved: List[TradeCandidate] = []
         for c in candidates:
             verdict = self._evaluate_risk(c)
             if verdict and getattr(verdict, "passed", False):
+                logger.info(f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine.")
                 approved.append(c)
+            else:
+                reason = getattr(verdict, "rejection_reason", "Risk verdict failed or undefined") if verdict else "Risk evaluation returned None"
+                logger.info(f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Risk Engine: {reason}")
 
         self.last_approved_count = len(approved)
 
@@ -144,9 +155,16 @@ class StrategyRunner:
                 if result and result.get("status") in ("FILLED", "SIMULATED_FILLED"):
                     executed += 1
                     logger.info(
-                        f"[StrategyRunner] cycle={cycle_id} executed {c.signal_type.name} {c.symbol} "
+                        f"[StrategyRunner] cycle={cycle_id} EXECUTED {c.signal_type.name} {c.symbol} "
                         f"@ {c.entry_price:.4f} ticket={result.get('broker_ticket')}"
                     )
+                else:
+                    reason = result.get("reason", "Unknown execution failure") if result else "Execution returned None"
+                    logger.error(f"[StrategyRunner] cycle={cycle_id} EXECUTION FAILED for {c.candidate_id}: {reason}")
+        else:
+            if approved:
+                logger.warning(f"[StrategyRunner] cycle={cycle_id}: {len(approved)} approved candidate(s) were NOT executed because broker is None.")
+
         self.last_executed_count = executed
 
         return {

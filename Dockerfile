@@ -26,5 +26,5 @@ COPY . .
 # Expose ports for API or Health Monitoring
 EXPOSE 8000
 
-# Default run command
-CMD ["python", "-m", "alpha_platform.verify_platform"]
+# Default run command for continuous 24/7 backend server
+CMD ["uvicorn", "alpha_platform.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
