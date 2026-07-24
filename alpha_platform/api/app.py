@@ -152,6 +152,49 @@ async def run_247_telegram_heartbeat_loop():
         except Exception as e:
             logger.error(f"Error in 24/7 Telegram heartbeat daemon: {e}")
 
+notified_deal_tickets = set()
+
+async def run_247_mt5_history_deal_sync_loop():
+    logger.info("Starting 24/7 Fast MT5 History Deal Close Monitor...")
+    from alpha_platform.core.telegram_notifier import telegram_notifier
+    from alpha_platform.execution_engine.mt5_bridge import HAS_MT5_LIB, mt5
+    from datetime import timedelta
+    
+    if HAS_MT5_LIB and mt5.terminal_info() is not None:
+        try:
+            now = datetime.now(timezone.utc)
+            from_date = now - timedelta(days=1)
+            past_deals = mt5.history_deals_get(from_date, now)
+            if past_deals:
+                for d in past_deals:
+                    if d.entry == 1:
+                        notified_deal_tickets.add(d.ticket)
+        except Exception as err:
+            logger.warning(f"Error seeding past deals: {err}")
+
+    while True:
+        try:
+            mt5_active = HAS_MT5_LIB and mt5_bridge.connected and mt5 is not None and mt5.terminal_info() is not None
+            if mt5_active:
+                now = datetime.now(timezone.utc)
+                from_date = now - timedelta(hours=6)
+                deals = mt5.history_deals_get(from_date, now)
+                if deals:
+                    for d in deals:
+                        if d.entry == 1 and d.ticket not in notified_deal_tickets:
+                            pnl = float(d.profit + d.swap + d.commission)
+                            sym = str(d.symbol).replace("m", "")
+                            logger.info(f"[Deal Monitor] Detected closed deal #{d.ticket} on {d.symbol}! PnL: ${pnl:+.2f}")
+                            telegram_notifier.notify_trade_closed(symbol=sym, profit=pnl, pips=0.0)
+                            notified_deal_tickets.add(d.ticket)
+        except asyncio.CancelledError:
+            logger.info("Stopping MT5 History Deal Monitor Daemon.")
+            break
+        except Exception as e:
+            logger.error(f"Error in MT5 History Deal Monitor daemon: {e}")
+            
+        await asyncio.sleep(5)
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -163,12 +206,13 @@ async def lifespan(app: FastAPI):
     collector_task = asyncio.create_task(run_247_data_collector_loop())
     strategy_task = asyncio.create_task(strategy_runner.loop())
     telegram_task = asyncio.create_task(run_247_telegram_heartbeat_loop())
-    logger.info("StrategyRunner, MT5Bridge & Telegram 24/7 Daemon registered in lifespan")
+    deal_task = asyncio.create_task(run_247_mt5_history_deal_sync_loop())
+    logger.info("StrategyRunner, MT5Bridge, DealMonitor & Telegram 24/7 Daemon registered in lifespan")
     try:
         yield
     finally:
         strategy_runner.stop()
-        for t in (collector_task, strategy_task, telegram_task):
+        for t in (collector_task, strategy_task, telegram_task, deal_task):
             t.cancel()
             try:
                 await t
