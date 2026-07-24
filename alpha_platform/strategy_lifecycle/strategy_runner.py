@@ -15,7 +15,7 @@ which is useful for paper-trading and verification on the cloud.
 import asyncio
 import random
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from alpha_platform.config.settings import settings
 from alpha_platform.config.logging_config import logger
@@ -45,12 +45,16 @@ class StrategyRunner:
         broker: Optional[MT5ExecutionBridge] = None,
         interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
         max_orders_per_cycle: int = 1,
+        meta_labeler: Optional[Any] = None,
     ):
         self.data_store = data_store
         self.risk_engine = risk_engine
         self.broker = broker
         self.interval_seconds = interval_seconds
         self.max_orders_per_cycle = max_orders_per_cycle
+        # Optional real meta-labeler; if absent, the AI gate is honestly
+        # bypassed (logged) rather than being silently replaced by a constant.
+        self.meta_labeler = meta_labeler
 
         self.strategies = [
             TrendFollowingStrategy(),
@@ -64,6 +68,8 @@ class StrategyRunner:
         self.last_executed_count = 0
         self.tracked_positions: Dict[int, Dict[str, Any]] = {}
         self.symbol_cooldowns: Dict[str, datetime] = {}
+        # Track recent realised P&L for the Revenge-Trade Guard in SelfCritic
+        self.recent_pnl_window: List[float] = []
         from alpha_platform.risk_engine.self_critic import InstitutionalSelfCriticValidator
         self.self_critic = InstitutionalSelfCriticValidator(min_composite_score=75.0)
         self._running = False
@@ -104,9 +110,15 @@ class StrategyRunner:
     def _evaluate_risk(self, candidate: TradeCandidate):
         try:
             active_positions = list(self.tracked_positions.values())
+            # CRITICAL FIX: derive current_equity from peak + realised P&L.
+            # Previously the code passed peak_equity as current_equity which
+            # made the 3.5% hard-DD kill-switch UNREACHABLE in production.
+            current_equity = float(
+                getattr(self.risk_engine, "peak_equity", 10000.0) or 10000.0
+            ) + float(sum(self.recent_pnl_window))
             return self.risk_engine.evaluate_candidate(
                 symbol=candidate.symbol,
-                current_equity=getattr(self.risk_engine, "peak_equity", 10000.0) or 10000.0,
+                current_equity=current_equity,
                 proposed_volume=0.01,
                 entry_price=candidate.entry_price,
                 stop_loss=candidate.stop_loss,
@@ -116,6 +128,32 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"[StrategyRunner] Risk eval failed for {candidate.candidate_id}: {e}")
             return None
+
+    def _get_ai_calibrated_prob(self, candidate: TradeCandidate) -> Tuple[float, bool]:
+        """
+        Returns (calibrated_prob, used_real_model).
+
+        If a real MetaLabelModelTrainer has been injected AND its underlying
+        model has been trained, we call predict_trade_quality() on the
+        candidate's feature snapshot. Otherwise we return (0.60, False) but
+        log a clear warning so the operator can see that the AI gate is
+        NOT actually engaged (replaces the previous silent hard-coded 0.60).
+        """
+        if self.meta_labeler is None or getattr(self.meta_labeler, "model", None) is None:
+            logger.warning(
+                "[StrategyRunner] AI gate is NOT active: no trained meta-labeler "
+                "was injected. Using fallback constant 0.60 (rejected trades will "
+                "fall back to deterministic rule filters only)."
+            )
+            return 0.60, False
+        try:
+            is_approved, raw_p, cal_p = self.meta_labeler.predict_trade_quality(
+                candidate.features_snapshot
+            )
+            return float(cal_p), True
+        except Exception as e:
+            logger.error(f"[StrategyRunner] AI inference failed: {e}. Falling back to 0.60.")
+            return 0.60, False
 
     async def _execute(self, candidate: TradeCandidate):
         if self.broker is None:
@@ -162,11 +200,15 @@ class StrategyRunner:
                         res = await self.broker.modify_order_sltp(ticket=ticket, sl=open_price, tp=pos.get("tp", 0.0))
                         if res.get("status") in ("MODIFIED", "SIMULATED_MODIFIED"):
                             logger.info(f"🛡️ [Break-Even] Position #{ticket} ({pos.get('symbol')}) moved to Break-Even at {open_price:.4f}!")
-                            from alpha_platform.core.telegram_notifier import telegram_notifier
-                            telegram_notifier.notify_risk_alert(
-                                "تأمين الصفقة تلقائياً (Break-Even)",
-                                f"تم تحريك إيقاف الخسارة للصفقة #{ticket} على {pos.get('symbol')} إلى سعر الدخول ({open_price:.4f}) لحجز الأرباح وتأمينها بدون مخاطرة!"
-                            )
+                            # Don't let a Telegram failure break the loop
+                            try:
+                                from alpha_platform.core.telegram_notifier import telegram_notifier
+                                telegram_notifier.notify_risk_alert(
+                                    "تأمين الصفقة تلقائياً (Break-Even)",
+                                    f"تم تحريك إيقاف الخسارة للصفقة #{ticket} على {pos.get('symbol')} إلى سعر الدخول ({open_price:.4f}) لحجز الأرباح وتأمينها بدون مخاطرة!"
+                                )
+                            except Exception as tlg_err:
+                                logger.warning(f"BE Telegram notify failed (non-critical): {tlg_err}")
         except Exception as e:
             logger.error(f"[StrategyRunner] Error during Break-Even evaluation: {e}")
 
@@ -196,7 +238,14 @@ class StrategyRunner:
                 logger.info(f"🔔 [Position Tracker] Position #{ticket} ({symbol}) closed on broker. PnL: ${profit:+.2f}")
                 from alpha_platform.core.telegram_notifier import telegram_notifier
                 telegram_notifier.notify_trade_closed(symbol=symbol, profit=profit, pips=0.0)
-                
+
+                # Feed realised P&L into the rolling window so the RiskEngine
+                # current_equity calc and the Self-Critic revenge-trade guard
+                # see the same data. Bound the window to last 50 trades.
+                self.recent_pnl_window.append(float(profit))
+                if len(self.recent_pnl_window) > 50:
+                    self.recent_pnl_window = self.recent_pnl_window[-50:]
+
                 del self.tracked_positions[ticket]
                 
             # Update tracked positions with current live positions
@@ -226,16 +275,26 @@ class StrategyRunner:
         for c in candidates:
             risk_verdict = self._evaluate_risk(c)
             if risk_verdict and getattr(risk_verdict, "passed", False):
-                # Dual Validator Pass: Institutional Self-Critic Gate
+                # Dual Validator Pass: Institutional Self-Critic Gate.
+                # CRITICAL FIX: previously the AI probability was hard-coded
+                # to 0.60 and the trained meta-labeler was never consulted.
+                # Now we call the real model if it has been wired in; if not,
+                # we log a warning so the operator can see the gap.
+                ai_prob, ai_real = self._get_ai_calibrated_prob(c)
+                # Pass recent realised P&L so the Revenge-Trade Guard works
                 sc_ok, score, grade, justification = self.self_critic.evaluate_and_critique(
                     candidate=c,
-                    ai_calibrated_prob=0.60,
+                    ai_calibrated_prob=ai_prob,
                     current_spread_pips=1.5 if "USD" in c.symbol and "XAU" not in c.symbol else 15.0,
                     active_positions=active_pos_list,
-                    recent_trade_results=[]
+                    recent_trade_results=self.recent_pnl_window[-5:],
                 )
                 if sc_ok:
-                    logger.info(f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine & Self-Critic [Grade {grade}, Score {score:.0f}/100].")
+                    ai_tag = "[AI=real]" if ai_real else "[AI=fallback]"
+                    logger.info(
+                        f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine & "
+                        f"Self-Critic [Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
+                    )
                     approved.append(c)
                 else:
                     logger.info(f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Self-Critic: {justification}")

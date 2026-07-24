@@ -104,8 +104,10 @@ class InstitutionalSelfCriticValidator:
             return False, score, grade, justification
 
         # Veto 2: Strict One Position Per Symbol Guard
+        cand_sym = str(candidate.symbol).upper().replace("M", "").replace(".C", "").replace(".", "")
         for pos in active_positions:
-            if pos.get("symbol") == candidate.symbol:
+            pos_sym = str(pos.get("symbol", "")).upper().replace("M", "").replace(".C", "").replace(".", "")
+            if pos_sym == cand_sym:
                 justification = f"REJECTED [One Position Per Symbol Guard]: Active position already exists on {candidate.symbol}. Multiple simultaneous trades on the same symbol are strictly prohibited."
                 candidate.self_critic_justification = justification
                 logger.info(f"[Self-Critic Veto] {candidate.candidate_id}: {justification}")

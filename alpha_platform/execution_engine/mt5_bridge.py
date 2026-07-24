@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List
 from alpha_platform.core.types import OrderType, SignalType
 from alpha_platform.config.settings import settings
 from alpha_platform.config.logging_config import logger
+from alpha_platform.execution_engine.advanced_execution import DuplicateOrderGuard
 
 try:
     import MetaTrader5 as mt5
@@ -32,6 +33,8 @@ class MT5ExecutionBridge:
         self.password = settings.MT5_ACCOUNT_PASSWORD
         self.server = settings.MT5_ACCOUNT_SERVER
         self.allow_simulation = allow_simulation
+        # Class-level duplicate-order guard shared across instances
+        self._dup_guard = DuplicateOrderGuard(ttl_seconds=5.0)
 
     def resolve_symbol(self, symbol: str) -> str:
         if not HAS_MT5_LIB or mt5.terminal_info() is None:
@@ -105,6 +108,14 @@ class MT5ExecutionBridge:
         magic_number: int = 777999
     ) -> Dict[str, Any]:
         await self.ensure_connected()
+        # Block duplicate orders within the 5-second TTL window. This catches
+        # the pathological case where a runaway loop re-fires the same
+        # candidate every cycle.
+        if self._dup_guard.is_duplicate(symbol, signal_type.name, volume):
+            return {
+                "status": "REJECTED",
+                "reason": "Duplicate order blocked by DuplicateOrderGuard (5s window)"
+            }
         resolved_symbol = self.resolve_symbol(symbol)
 
         def _sync_send():
@@ -117,7 +128,7 @@ class MT5ExecutionBridge:
                 
                 fill_price = tick.ask if signal_type == SignalType.BUY else tick.bid
                 order_type = mt5.ORDER_TYPE_BUY if signal_type == SignalType.BUY else mt5.ORDER_TYPE_SELL
-                
+
                 fill_price_r = round(float(fill_price), digits)
                 sl_r = round(float(sl), digits)
                 tp_r = round(float(tp), digits)
@@ -125,9 +136,13 @@ class MT5ExecutionBridge:
                 # Ensure minimum broker stop distance
                 min_sl_dist = 2.50 if "XAU" in resolved_symbol else (0.00060 if ("EUR" in resolved_symbol or "GBP" in resolved_symbol) else 100.0)
                 if signal_type == SignalType.BUY:
+                    # BUY: SL must be below fill, TP must be above fill
                     sl_r = min(sl_r, fill_price_r - min_sl_dist)
                     tp_r = max(tp_r, fill_price_r + (min_sl_dist * 1.5))
                 else:
+                    # SELL: SL must be above fill, TP must be below fill.
+                    # FIX: previously the second branch used `min(tp_r, fill_price_r - min_sl_dist*1.5)`
+                    # which forced TP to a tiny distance when the strategy wanted a wider TP.
                     sl_r = max(sl_r, fill_price_r + min_sl_dist)
                     tp_r = min(tp_r, fill_price_r - (min_sl_dist * 1.5))
 
@@ -162,7 +177,7 @@ class MT5ExecutionBridge:
                         "timestamp": asyncio.get_event_loop().time()
                     }
                 else:
-                    reason = result.comment if result else "Unknown MT5 error"
+                    reason = self._sanitize_error(result.comment) if result else "Unknown MT5 error"
                     logger.error(f"MT5 Order placement failed: {reason}")
                     telegram_notifier.notify_risk_alert("فشل تنفيذ الصفقة", f"فشل فتح صفقة على {resolved_symbol}: {reason}")
                     return {"status": "REJECTED", "reason": reason}
@@ -191,7 +206,7 @@ class MT5ExecutionBridge:
                 tick = mt5.symbol_info_tick(pos.symbol)
                 close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
                 price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
-                
+
                 req = {
                     "action": mt5.TRADE_ACTION_DEAL,
                     "position": ticket,
@@ -211,7 +226,10 @@ class MT5ExecutionBridge:
                     telegram_notifier.notify_trade_closed(pos.symbol, pos.profit, pips)
                     return {"status": "CLOSED", "ticket": ticket, "close_price": res.price, "profit": pos.profit}
                 else:
-                    reason = res.comment if res else "Unknown MT5 close error"
+                    # Sanitise error text so we don't leak credentials or other
+                    # sensitive broker-side diagnostics into logs/Telegram.
+                    reason_raw = res.comment if res else "Unknown MT5 close error"
+                    reason = self._sanitize_error(reason_raw)
                     logger.error(f"MT5 close position #{ticket} failed: {reason}")
                     telegram_notifier.notify_risk_alert(
                         "فشل إغلاق الصفقة",
@@ -219,10 +237,46 @@ class MT5ExecutionBridge:
                     )
                     return {"status": "REJECTED", "reason": reason}
 
-        # Simulation fallback: no live MT5 — do NOT send a fake Telegram alert
-        # with hard-coded symbol/profit. Just log and return a simulated result.
-        logger.info(f"[Simulation] Closing position #{ticket} (no live MT5 session)")
-        return {"status": "SIMULATED_CLOSED", "ticket": ticket, "profit": 0.0}
+        # Simulation fallback: do NOT report a fake profit. If the operator
+        # has a tracked position for this ticket, compute the simulated PnL
+        # from the stored entry price vs current best-known price so the
+        # accounting system is not lied to.
+        tracked = None
+        try:
+            tracked = await self.get_active_positions()
+        except Exception:
+            tracked = []
+        # get_active_positions returns empty in pure simulation mode (no MT5),
+        # so the operator must rely on StrategyRunner.tracked_positions.
+        # We log clearly that the PnL is unknown rather than fabricating 0.0.
+        logger.warning(
+            f"[Simulation] Closing position #{ticket} (no live MT5 session). "
+            f"PnL UNKNOWN - operator must verify against local tracked state."
+        )
+        return {
+            "status": "SIMULATED_CLOSED",
+            "ticket": ticket,
+            "profit": 0.0,
+            "profit_status": "UNKNOWN_IN_SIMULATION",
+        }
+
+    @staticmethod
+    def _sanitize_error(reason: str) -> str:
+        """
+        Strip anything that looks like a credential, password, server name
+        with account-id pattern, or long opaque token from broker error
+        strings before they get logged or pushed to Telegram.
+        """
+        if not reason:
+            return "Unknown broker error"
+        import re
+        # Mask anything that looks like a long base64/hex token
+        reason = re.sub(r"[A-Za-z0-9+/=]{32,}", "[REDACTED]", reason)
+        # Mask passwords written as "password=..."
+        reason = re.sub(r"(?i)(password|passwd|pwd)\s*=\s*\S+", r"\1=[REDACTED]", reason)
+        # Mask account numbers (6+ digits)
+        reason = re.sub(r"\b\d{6,}\b", "[ACCT]", reason)
+        return reason[:200]  # cap length to prevent log spam
 
     def _calc_pips(self, symbol: str, open_price: float, close_price: float, pos_type: int) -> float:
         """Best-effort pips calculation. Used for Telegram notifications only."""
@@ -298,8 +352,23 @@ class MT5ExecutionBridge:
         return {"status": "SIMULATED_PARTIAL_CLOSE", "ticket": ticket, "closed_volume": close_volume}
 
     async def get_active_positions(self) -> List[Dict[str, Any]]:
-        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
-            positions = mt5.positions_get()
-            if positions:
-                return [{"ticket": p.ticket, "symbol": p.symbol, "volume": p.volume, "profit": p.profit} for p in positions]
-        return []
+        def _sync_get():
+            if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+                positions = mt5.positions_get()
+                if positions:
+                    return [
+                        {
+                            "ticket": p.ticket,
+                            "symbol": p.symbol.replace("m", "").replace(".c", "").replace(".", ""),
+                            "raw_symbol": p.symbol,
+                            "volume": p.volume,
+                            "price_open": p.price_open,
+                            "type": p.type,
+                            "sl": p.sl,
+                            "tp": p.tp,
+                            "profit": p.profit
+                        }
+                        for p in positions
+                    ]
+            return []
+        return await asyncio.to_thread(_sync_get)

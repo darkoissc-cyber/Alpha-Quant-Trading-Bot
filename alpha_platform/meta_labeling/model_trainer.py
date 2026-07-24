@@ -16,16 +16,20 @@ class MetaLabelModelTrainer:
     def train(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
         self.feature_names = list(X.columns)
         cv = PurgedGroupTimeSeriesSplit(n_splits=5, pct_embargo=0.01)
-        
+
         oof_predictions = np.zeros(len(X))
-        
+
         for train_idx, val_idx in cv.split(X, y):
             X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
             X_val = X.iloc[val_idx]
-            
+
             clf = GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=42)
             clf.fit(X_train, y_train)
             oof_predictions[val_idx] = clf.predict_proba(X_val)[:, 1]
+
+        # Persist OOF predictions so downstream consumers (DSR/PBO estimators
+        # in the governance / retraining pipeline) can measure honest quality.
+        self._last_oof_predictions = oof_predictions
 
         # Train final model on full set
         self.model = GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=42)

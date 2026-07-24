@@ -161,8 +161,16 @@ class InstitutionalMarketStructureAnalyzer:
         closes = np.array([b.close for b in bars])
 
         tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
+        # Guard against NaN/Inf in source bars (corrupt ticks, partial fills, etc.)
+        tr = np.nan_to_num(tr, nan=0.0, posinf=0.0, neginf=0.0)
+        if len(tr) == 0 or float(np.max(tr)) <= 0:
+            return "NORMAL", 1.0
+
         atr_14 = float(np.mean(tr[-14:]))
         atr_50 = float(np.mean(tr[-50:])) if len(tr) >= 50 else atr_14
+
+        if atr_50 <= 0 or not np.isfinite(atr_14) or not np.isfinite(atr_50):
+            return "NORMAL", max(1e-8, atr_14 if np.isfinite(atr_14) else 1.0)
 
         vol_ratio = atr_14 / (atr_50 + 1e-8)
 

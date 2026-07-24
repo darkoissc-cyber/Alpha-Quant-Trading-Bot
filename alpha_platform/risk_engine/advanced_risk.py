@@ -32,7 +32,17 @@ class CorrelationMatrixEngine:
     def compute_correlation_matrix(self, price_returns_df: pd.DataFrame) -> pd.DataFrame:
         if price_returns_df is None or price_returns_df.empty or len(price_returns_df.columns) < 2:
             return pd.DataFrame()
-        return price_returns_df.corr()
+        # Constant columns cause NaN in the correlation matrix which then
+        # crashes the exposure-allowed check. Replace constant cols with
+        # small noise so the resulting correlation is well-defined.
+        cleaned = price_returns_df.copy()
+        for col in cleaned.columns:
+            if cleaned[col].std() == 0 or cleaned[col].isna().all():
+                cleaned[col] = np.random.RandomState(42).normal(0, 1e-6, len(cleaned))
+        corr = cleaned.corr()
+        # Final NaN/Inf safety net
+        corr = corr.fillna(0.0).replace([np.inf, -np.inf], 0.0)
+        return corr
 
     def is_exposure_allowed(
         self,

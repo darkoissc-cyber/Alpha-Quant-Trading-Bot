@@ -1,3 +1,4 @@
+import numpy as np
 from datetime import datetime
 from typing import Dict
 from alpha_platform.core.types import MarketSession
@@ -29,5 +30,3 @@ class SessionFeatureExtractor:
             "hour_sin": float(np.sin(2 * np.pi * dt.hour / 24.0)),
             "hour_cos": float(np.cos(2 * np.pi * dt.hour / 24.0))
         }
-
-import numpy as np

@@ -5,7 +5,7 @@ import signal
 import threading
 from typing import Dict, Any, List
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from alpha_platform.config.logging_config import logger
 
@@ -26,7 +26,7 @@ class SystemHealthMetrics:
     thread_count: int
     open_files_count: int
     warnings: List[str] = field(default_factory=list)
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class SystemHealthMonitor:
     """

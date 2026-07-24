@@ -1,8 +1,8 @@
 import time
 import asyncio
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from alpha_platform.config.logging_config import logger
 from alpha_platform.system.metrics import metrics_collector
@@ -59,15 +59,25 @@ class ExecutionRetryQueue:
             order_payload["next_retry_time"] = time.time() + ((self.base_delay_ms * (2 ** (attempt - 1))) / 1000.0)
             self.pending_retries.append(order_payload)
             logger.info(f"Order queued for retry attempt {attempt}/{self.max_retries}: {order_payload.get('symbol')}")
+        else:
+            logger.error(
+                f"Order permanently failed after {self.max_retries} retries: "
+                f"{order_payload.get('symbol')} {order_payload.get('signal_type')}"
+            )
 
-    def pop_ready_orders() -> List[Dict[str, Any]]:
-        pass
-
-    def get_ready_orders(self) -> List[Dict[str, Any]]:
+    def pop_ready_orders(self) -> List[Dict[str, Any]]:
+        """
+        Atomically pop and return all orders whose retry timer has expired.
+        Kept the legacy `get_ready_orders` for backward compatibility but the
+        canonical name (matching the add/pop pattern) is `pop_ready_orders`.
+        """
         now = time.time()
         ready = [o for o in self.pending_retries if o["next_retry_time"] <= now]
         self.pending_retries = [o for o in self.pending_retries if o["next_retry_time"] > now]
         return ready
+
+    def get_ready_orders(self) -> List[Dict[str, Any]]:
+        return self.pop_ready_orders()
 
 class ExecutionAuditLogger:
     """
@@ -90,7 +100,7 @@ class ExecutionAuditLogger:
         slippage_pips = abs(fill_price - expected_price) if fill_price > 0 and expected_price > 0 else 0.0
         
         entry = AuditLogEntry(
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat(),
             symbol=symbol,
             action=action,
             status=status,

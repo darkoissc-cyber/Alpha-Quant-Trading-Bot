@@ -82,6 +82,43 @@ class TimeSeriesDataStore:
                 INSERT OR REPLACE INTO candles (symbol, timestamp, open, high, low, close, volume, tick_count)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
+            # Checkpoint WAL to keep the -wal file bounded. Without this
+            # checkpoint, the WAL grows unbounded over days/weeks of
+            # continuous operation and can fill the disk.
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            except Exception:
+                pass
+
+    def prune_old_candles(self, keep_last_n: int = 5000):
+        """
+        Cap the candles table to the most recent N rows per symbol to
+        prevent unbounded growth. Safe because the live system only reads
+        the last ~100 bars per symbol anyway.
+        """
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT symbol FROM candles")
+            for (sym,) in cur.fetchall():
+                cur.execute(
+                    """
+                    DELETE FROM candles
+                    WHERE symbol = ?
+                      AND rowid NOT IN (
+                        SELECT rowid FROM candles
+                        WHERE symbol = ?
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                      )
+                    """,
+                    (sym, sym, int(keep_last_n)),
+                )
+            conn.commit()
+            try:
+                conn.execute("VACUUM;")
+            except Exception:
+                pass
+            logger.info(f"[TimeSeriesDB] Pruned candles to last {keep_last_n} per symbol.")
 
     def query_candles(self, symbol: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, limit: int = 1000) -> List[Bar]:
         query = "SELECT symbol, timestamp, open, high, low, close, volume, tick_count FROM candles WHERE symbol = ?"

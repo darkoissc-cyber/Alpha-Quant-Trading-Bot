@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import asyncio
 import urllib.request
 import urllib.error
@@ -9,13 +10,17 @@ from alpha_platform.config.logging_config import logger
 
 class TelegramNotifier:
     """
-    Production-grade Telegram notification service for trade alerts, 
+    Production-grade Telegram notification service for trade alerts,
     risk triggers, and periodic equity/drawdown heartbeat reports.
     """
 
     def __init__(self, bot_token: Optional[str] = None, chat_id: Optional[str] = None):
         self.bot_token = bot_token or settings.TELEGRAM_BOT_TOKEN
         self.chat_id = chat_id or settings.TELEGRAM_CHAT_ID
+        # Throttle: ensure at least 50ms between consecutive sends to
+        # protect against floods from upstream loops.
+        self._last_send_ts: float = 0.0
+        self._min_send_interval_sec: float = 0.05
 
     def is_configured(self) -> bool:
         return bool(self.bot_token and self.chat_id)
@@ -30,29 +35,45 @@ class TelegramNotifier:
             logger.warning("Telegram Notifier: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured.")
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        # Throttle: don't hammer the API if a flood happens upstream
+        now = time.time()
+        if now - self._last_send_ts < self._min_send_interval_sec:
+            time.sleep(self._min_send_interval_sec - (now - self._last_send_ts))
+        self._last_send_ts = time.time()
+
+        # Never log the full bot token. Build URL with masked identifier.
+        url = f"https://api.telegram.org/bot{self._masked_token()}/sendMessage"
+        # Send the real URL but log only the masked version if anything fails.
+        real_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
-            "text": text,
+            "text": text[:4096],  # Telegram text length cap
             "parse_mode": parse_mode
         }
 
         try:
             req = urllib.request.Request(
-                url,
+                real_url,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
             with urllib.request.urlopen(req, timeout=10) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
                 if res_data.get("ok"):
-                    logger.info("Telegram notification sent successfully.")
+                    logger.info(f"Telegram notification sent successfully via {self._masked_token()}")
                     return True
                 else:
-                    logger.error(f"Telegram API returned error: {res_data}")
+                    # Telegram's error response shouldn't include our token,
+                    # but defensively scrub any 32+ char tokens from the log
+                    err_text = json.dumps(res_data)
+                    import re
+                    err_text = re.sub(r"[A-Za-z0-9+/=]{32,}", "[REDACTED]", err_text)
+                    logger.error(f"Telegram API returned error: {err_text}")
                     return False
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8") if e.fp else str(e)
+            import re
+            err_body = re.sub(r"[A-Za-z0-9+/=]{32,}", "[REDACTED]", err_body)
             logger.error(f"HTTPError sending Telegram notification: {err_body}")
             return False
         except Exception as e:

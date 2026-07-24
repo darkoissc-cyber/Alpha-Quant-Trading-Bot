@@ -271,14 +271,22 @@ class NewsFilter:
                 if new_events:
                     self._cached_events = new_events
                     self._provider_failed = False
-                elif not self._cached_events:
+                    self._last_refresh = datetime.now(timezone.utc)
+                else:
+                    # Provider returned no data (likely failure path). Mark
+                    # failed but DO NOT advance _last_refresh so we retry on
+                    # the next call. This closes the previous 15-minute blind
+                    # window after a transient outage.
                     self._provider_failed = True
-                self._last_refresh = datetime.now(timezone.utc)
+                    logger.warning(
+                        "[NewsFilter] Provider returned no events. Will retry "
+                        "on next cycle instead of waiting for full TTL."
+                    )
         except Exception as e:
             logger.warning(f"[NewsFilter] Periodic event refresh error: {e}")
             with self._lock:
                 self._provider_failed = True
-                self._last_refresh = datetime.now(timezone.utc)
+                # Same rationale: keep _last_refresh stale so we recover ASAP.
 
     @staticmethod
     def get_symbol_currencies(symbol: str) -> List[str]:

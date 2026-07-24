@@ -226,13 +226,26 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Restrict CORS to known dashboard origins only. Production should set
+# ALLOWED_ORIGINS env var; development defaults to localhost.
+import os as _os
+_allowed_origins = [
+    o.strip() for o in _os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173"
+    ).split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Rate limiting + security headers
+from alpha_platform.api.middleware import RateLimitMiddleware
+app.add_middleware(RateLimitMiddleware)
 
 from alpha_platform.system.health_monitor import health_monitor, shutdown_handler
 from alpha_platform.system.metrics import metrics_collector, measure_execution_time
@@ -283,6 +296,22 @@ def get_risk_status() -> Dict[str, Any]:
         "hard_limit_hit": False,
         "max_leverage": settings.MAX_POSITION_LEVERAGE,
         "spread_limits": settings.MAX_SPREAD_PIPS_LIMIT
+    }
+
+@app.get("/api/security/health")
+def security_health() -> Dict[str, Any]:
+    """
+    Sanitised health check that NEVER includes credentials, server names,
+    or account numbers. Safe to expose behind auth in production.
+    """
+    return {
+        "broker_configured": bool(settings.MT5_ACCOUNT_LOGIN and settings.MT5_ACCOUNT_PASSWORD),
+        "broker_login_set": settings.MT5_ACCOUNT_LOGIN != 474251097,  # default placeholder
+        "telegram_configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
+        "news_filter_enabled": settings.NEWS_ENABLED,
+        "cors_origins_count": len(_allowed_origins),
+        "environment": settings.ENVIRONMENT,
+        # Never include: passwords, tokens, server, account login
     }
 
 @app.post("/api/risk/trigger-kill-switch")
