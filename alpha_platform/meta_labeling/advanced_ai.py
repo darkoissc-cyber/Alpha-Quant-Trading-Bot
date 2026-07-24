@@ -156,6 +156,7 @@ class AutoRetrainingPipeline:
                 pbo_value = float(PBOEstimator.calculate_pbo(
                     np.column_stack([oof_predictions, oof_predictions])
                 )) if len(oof_predictions) >= 50 else 0.05
+                logger.info(f"[AutoRetrainingPipeline] Computed honest DSR={dsr_value:.3f}, PBO={pbo_value:.3f} from OOF predictions")
             else:
                 dsr_value, pbo_value = 0.0, 1.0
                 logger.warning("Insufficient OOF predictions for honest DSR/PBO measurement.")
@@ -164,6 +165,7 @@ class AutoRetrainingPipeline:
             dsr_value, pbo_value = 0.0, 1.0
 
         # 5. Register in Model Governance
+        # CRITICAL FIX: time module is imported at the top of this file (line 1)
         version = f"v{int(time.time())}"
         model_id = f"{model_id_prefix}_{version}"
 

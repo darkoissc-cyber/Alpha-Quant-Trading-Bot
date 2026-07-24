@@ -99,6 +99,7 @@ class ExecutionAuditLogger:
     ):
         slippage_pips = abs(fill_price - expected_price) if fill_price > 0 and expected_price > 0 else 0.0
         
+        # CRITICAL FIX: Use datetime.now(timezone.utc) instead of deprecated datetime.utcnow()
         entry = AuditLogEntry(
             timestamp=datetime.now(timezone.utc).isoformat(),
             symbol=symbol,

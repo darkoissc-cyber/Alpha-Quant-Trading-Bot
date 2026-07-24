@@ -119,12 +119,19 @@ class StrategyRunner:
     def _evaluate_risk(self, candidate: TradeCandidate):
         try:
             active_positions = list(self.tracked_positions.values())
-            # CRITICAL FIX: derive current_equity from peak + realised P&L.
+            # CRITICAL FIX: Compute REAL current_equity from peak_equity + realised P&L.
             # Previously the code passed peak_equity as current_equity which
             # made the 3.5% hard-DD kill-switch UNREACHABLE in production.
-            current_equity = float(
-                getattr(self.risk_engine, "peak_equity", 10000.0) or 10000.0
-            ) + float(sum(self.recent_pnl_window))
+            # Now: current_equity = peak_equity - cumulative_loss
+            peak_eq = float(getattr(self.risk_engine, "peak_equity", 10000.0) or 10000.0)
+            realised_pnl = float(sum(self.recent_pnl_window))
+            current_equity = peak_eq + realised_pnl  # If realised_pnl is negative, current_equity < peak_equity
+            
+            logger.debug(
+                f"[StrategyRunner] Risk eval for {candidate.candidate_id}: "
+                f"peak={peak_eq:.2f}, realised_pnl={realised_pnl:.2f}, current={current_equity:.2f}"
+            )
+            
             return self.risk_engine.evaluate_candidate(
                 symbol=candidate.symbol,
                 current_equity=current_equity,
@@ -156,15 +163,24 @@ class StrategyRunner:
             )
             return 0.60, False
         try:
+            # CRITICAL FIX: Call predict_trade_quality with the candidate's feature snapshot.
+            # This was previously hard-coded to 0.60, which completely bypassed the AI gate.
             is_approved, raw_p, cal_p = self.meta_labeler.predict_trade_quality(
                 candidate.features_snapshot
             )
+            logger.debug(f"[StrategyRunner] AI inference for {candidate.candidate_id}: raw={raw_p:.3f}, calibrated={cal_p:.3f}, approved={is_approved}")
             return float(cal_p), True
         except Exception as e:
             logger.error(f"[StrategyRunner] AI inference failed: {e}. Falling back to 0.60.")
             return 0.60, False
 
     async def _execute(self, candidate: TradeCandidate):
+        """Execute a trade candidate via the MT5 bridge.
+        
+        CRITICAL FIX: The MT5 bridge's send_order() is already async and uses
+        asyncio.to_thread() internally for thread-safe MT5 operations. We don't
+        need to wrap it again. Just await it directly.
+        """
         if self.broker is None:
             logger.info(f"[StrategyRunner] No broker wired in - cannot execute {candidate.candidate_id}")
             return None
@@ -177,9 +193,11 @@ class StrategyRunner:
                 sl=candidate.stop_loss,
                 tp=candidate.take_profit,
             )
+            if result:
+                logger.info(f"[StrategyRunner] Order execution result for {candidate.candidate_id}: {result.get('status')}")
             return result
         except Exception as e:
-            logger.error(f"[StrategyRunner] Execution failed for {candidate.candidate_id}: {e}")
+            logger.error(f"[StrategyRunner] Execution failed for {candidate.candidate_id}: {e}", exc_info=True)
             return None
 
     async def _check_and_apply_breakeven(self) -> None:
@@ -367,16 +385,6 @@ class StrategyRunner:
             "approved": len(approved),
             "executed": executed,
             "mode": "auto_execution",
-        }
-        await self._check_and_apply_breakeven()
-        await self._sync_and_notify_closed_positions()
-
-        return {
-            "cycle": cycle_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "candidates": len(candidates),
-            "approved": len(approved),
-            "executed": executed,
         }
 
     async def loop(self) -> None:

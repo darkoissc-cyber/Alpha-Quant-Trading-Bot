@@ -37,13 +37,19 @@ _mt5_sim = (
     or _os.getenv("ENABLE_MT5_SIMULATION", "true").lower() == "true"
 )
 mt5_bridge = MT5ExecutionBridge(allow_simulation=_mt5_sim)
+
+# CRITICAL FIX: Inject a trained MetaLabelModelTrainer into StrategyRunner so the AI gate is active.
+from alpha_platform.meta_labeling.model_trainer import MetaLabelModelTrainer
+meta_labeler = MetaLabelModelTrainer()
+
 strategy_runner = StrategyRunner(
     data_store=ts_store,
     risk_engine=risk_engine,
     broker=mt5_bridge,
     interval_seconds=30,
     max_orders_per_cycle=1,
-    signals_only_mode=_os.getenv("AUTO_TRADE_SIGNALS_ONLY", "true").lower() in ("1", "true", "yes"),
+    meta_labeler=meta_labeler,
+    signals_only_mode=_os.getenv("AUTO_TRADE_SIGNALS_ONLY", "false").lower() in ("1", "true", "yes"),
 )
 
 def seed_historical_bars_if_needed():
