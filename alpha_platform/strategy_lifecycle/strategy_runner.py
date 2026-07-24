@@ -62,6 +62,7 @@ class StrategyRunner:
         self.last_candidate_count = 0
         self.last_approved_count = 0
         self.last_executed_count = 0
+        self.tracked_positions: Dict[int, Dict[str, Any]] = {}
         self._running = False
 
     def set_broker(self, broker: MT5ExecutionBridge) -> None:
@@ -157,6 +158,41 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"[StrategyRunner] Error during Break-Even evaluation: {e}")
 
+    async def _sync_and_notify_closed_positions(self) -> None:
+        if self.broker is None:
+            return
+        try:
+            from alpha_platform.execution_engine.mt5_bridge import HAS_MT5_LIB, mt5
+            current_positions = await self.broker.get_active_positions()
+            current_live_map = {pos["ticket"]: pos for pos in current_positions if "ticket" in pos}
+            
+            # Detect positions that were in tracked_positions but are no longer active on MT5
+            closed_tickets = [t for t in self.tracked_positions if t not in current_live_map]
+            for ticket in closed_tickets:
+                pos_info = self.tracked_positions[ticket]
+                symbol = pos_info.get("symbol", "UNKNOWN")
+                profit = pos_info.get("profit", 0.0)
+                
+                if HAS_MT5_LIB and mt5.terminal_info() is not None:
+                    try:
+                        deals = mt5.history_deals_get(position=ticket)
+                        if deals and len(deals) > 0:
+                            profit = sum(d.profit + d.swap + d.commission for d in deals)
+                    except Exception as err:
+                        logger.warning(f"Could not query MT5 history deals for ticket {ticket}: {err}")
+                
+                logger.info(f"🔔 [Position Tracker] Position #{ticket} ({symbol}) closed on broker. PnL: ${profit:+.2f}")
+                from alpha_platform.core.telegram_notifier import telegram_notifier
+                telegram_notifier.notify_trade_closed(symbol=symbol, profit=profit, pips=0.0)
+                
+                del self.tracked_positions[ticket]
+                
+            # Update tracked positions with current live positions
+            for ticket, pos in current_live_map.items():
+                self.tracked_positions[ticket] = pos
+        except Exception as e:
+            logger.error(f"[StrategyRunner] Position reconciliation error: {e}")
+
     async def run_once(self) -> Dict[str, Any]:
         self.cycle_count += 1
         cycle_id = self.cycle_count
@@ -202,6 +238,7 @@ class StrategyRunner:
 
         self.last_executed_count = executed
         await self._check_and_apply_breakeven()
+        await self._sync_and_notify_closed_positions()
 
         return {
             "cycle": cycle_id,
