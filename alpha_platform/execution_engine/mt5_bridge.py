@@ -199,15 +199,10 @@ class MT5ExecutionBridge:
                 logger.error(f"Cannot dispatch real order for {resolved_symbol}: MT5 Terminal is NOT connected and simulation is disabled.")
                 return {"status": "REJECTED", "reason": "MT5 Terminal disconnected (Simulation disabled)"}
 
-            logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
-            telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, price, sl, tp)
+            logger.info(f"MT5 Terminal disconnected on cloud server - skipping real order for {resolved_symbol} (Simulation mode)")
             return {
-                "status": "FILLED",
-                "broker_ticket": 474251097,
-                "fill_price": price,
-                "fill_volume": volume,
-                "slippage": 0.0,
-                "timestamp": _now_ts
+                "status": "REJECTED",
+                "reason": "MT5 Terminal disconnected on cloud server. Real order dispatch requires local MT5 execution bridge."
             }
 
         return await asyncio.to_thread(_sync_send)
