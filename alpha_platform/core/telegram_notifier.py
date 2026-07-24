@@ -20,6 +20,11 @@ class TelegramNotifier:
     def is_configured(self) -> bool:
         return bool(self.bot_token and self.chat_id)
 
+    def _masked_token(self) -> str:
+        if not self.bot_token or len(self.bot_token) < 10:
+            return "***"
+        return f"{self.bot_token[:6]}...***"
+
     def send_message_sync(self, text: str, parse_mode: str = "Markdown") -> bool:
         if not self.is_configured():
             logger.warning("Telegram Notifier: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured.")

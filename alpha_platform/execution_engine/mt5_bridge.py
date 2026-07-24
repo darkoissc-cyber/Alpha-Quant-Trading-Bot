@@ -45,47 +45,54 @@ class MT5ExecutionBridge:
         return symbol
 
     async def connect(self) -> bool:
-        # First, try without credentials (use already-open MT5 Terminal session)
-        if HAS_MT5_LIB:
-            logger.info("Connecting to already-open MT5 Terminal session...")
-            initialized = mt5.initialize()
-            if initialized:
-                acc = mt5.account_info()
-                if acc is not None:
-                    self.login = acc.login
-                    self.server = acc.server
+        def _sync_connect():
+            if HAS_MT5_LIB:
+                logger.info("Connecting to already-open MT5 Terminal session...")
+                initialized = mt5.initialize()
+                if initialized:
+                    acc = mt5.account_info()
+                    if acc is not None:
+                        self.login = acc.login
+                        self.server = acc.server
+                        self.connected = True
+                        logger.info(f"MetaTrader 5 Bridge CONNECTED to existing terminal: account {acc.login} on {acc.server}")
+                        return True
+                    else:
+                        logger.warning(f"MT5 initialized but no account info: {mt5.last_error()}")
+                else:
+                    logger.warning(f"MT5 initialize() without credentials failed: {mt5.last_error()}")
+
+            if HAS_MT5_LIB and self.login and self.password:
+                logger.info(f"Attempting direct MT5 login for account {self.login} on {self.server}...")
+                initialized = mt5.initialize(
+                    login=self.login,
+                    password=self.password,
+                    server=self.server
+                )
+                if initialized:
                     self.connected = True
-                    logger.info(f"MetaTrader 5 Bridge CONNECTED to existing terminal: account {acc.login} on {acc.server}")
+                    logger.info(f"MetaTrader 5 Direct Bridge CONNECTED successfully to account {self.login}")
                     return True
                 else:
-                    logger.warning(f"MT5 initialized but no account info: {mt5.last_error()}")
-            else:
-                logger.warning(f"MT5 initialize() without credentials failed: {mt5.last_error()}")
+                    err_msg = f"MT5 Initialization failed: {mt5.last_error()}"
+                    logger.error(err_msg)
+                    if settings.ENVIRONMENT == "production" or not self.allow_simulation:
+                        raise BrokerConnectionError(err_msg)
 
-        # Fallback: try direct login (when running headless)
-        if HAS_MT5_LIB and self.login and self.password:
-            logger.info(f"Attempting direct MT5 login for account {self.login} on {self.server}...")
-            initialized = mt5.initialize(
-                login=self.login,
-                password=self.password,
-                server=self.server
-            )
-            if initialized:
-                self.connected = True
-                logger.info(f"MetaTrader 5 Direct Bridge CONNECTED successfully to account {self.login}")
-                return True
-            else:
-                err_msg = f"MT5 Initialization failed: {mt5.last_error()}"
-                logger.error(err_msg)
-                if settings.ENVIRONMENT == "production" or not self.allow_simulation:
-                    raise BrokerConnectionError(err_msg)
+            if settings.ENVIRONMENT == "production" or not self.allow_simulation:
+                raise BrokerConnectionError("MetaTrader5 library or valid account credentials unavailable in production mode.")
 
-        if settings.ENVIRONMENT == "production" or not self.allow_simulation:
-            raise BrokerConnectionError("MetaTrader5 library or valid account credentials unavailable in production mode.")
+            self.connected = True
+            logger.warning(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login}")
+            return True
 
-        self.connected = True
-        logger.warning(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login}")
-        return True
+        return await asyncio.to_thread(_sync_connect)
+
+    async def ensure_connected(self) -> bool:
+        if HAS_MT5_LIB and mt5.terminal_info() is None:
+            logger.warning("MT5 Terminal disconnected - attempting auto-reconnect...")
+            return await self.connect()
+        return self.connected
 
     async def send_order(
         self,
@@ -97,66 +104,72 @@ class MT5ExecutionBridge:
         tp: float,
         magic_number: int = 777999
     ) -> Dict[str, Any]:
+        await self.ensure_connected()
         resolved_symbol = self.resolve_symbol(symbol)
 
-        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
-            sym_info = mt5.symbol_info(resolved_symbol)
-            digits = sym_info.digits if sym_info is not None else 2
-            tick = mt5.symbol_info_tick(resolved_symbol)
-            fill_price = tick.ask if signal_type == SignalType.BUY else tick.bid
-            order_type = mt5.ORDER_TYPE_BUY if signal_type == SignalType.BUY else mt5.ORDER_TYPE_SELL
-            
-            # Round fill price, SL, and TP to broker exact precision
-            fill_price = round(float(fill_price), digits)
-            sl = round(float(sl), digits)
-            tp = round(float(tp), digits)
-            
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": resolved_symbol,
-                "volume": volume,
-                "type": order_type,
-                "price": fill_price,
-                "sl": sl,
-                "tp": tp,
-                "deviation": 20,
-                "magic": magic_number,
-                "comment": "Alpha Quant Live Order",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
-            }
-            result = mt5.order_send(request)
-            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                logger.info(f"REAL ORDER FILLED on Exness MT5! Ticket: {result.order}")
-                telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, result.price, sl, tp)
-                return {
-                    "status": "FILLED",
-                    "broker_ticket": result.order,
-                    "fill_price": result.price,
-                    "fill_volume": result.volume,
-                    "slippage": 0.0,
-                    "timestamp": asyncio.get_event_loop().time()
+        def _sync_send():
+            if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+                sym_info = mt5.symbol_info(resolved_symbol)
+                digits = sym_info.digits if sym_info is not None else 2
+                tick = mt5.symbol_info_tick(resolved_symbol)
+                if tick is None:
+                    return {"status": "REJECTED", "reason": f"No market tick for {resolved_symbol}"}
+                
+                fill_price = tick.ask if signal_type == SignalType.BUY else tick.bid
+                order_type = mt5.ORDER_TYPE_BUY if signal_type == SignalType.BUY else mt5.ORDER_TYPE_SELL
+                
+                # Round fill price, SL, and TP to broker exact precision
+                fill_price_r = round(float(fill_price), digits)
+                sl_r = round(float(sl), digits)
+                tp_r = round(float(tp), digits)
+                
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": resolved_symbol,
+                    "volume": volume,
+                    "type": order_type,
+                    "price": fill_price_r,
+                    "sl": sl_r,
+                    "tp": tp_r,
+                    "deviation": 20,
+                    "magic": magic_number,
+                    "comment": "Alpha Quant Live Order",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
                 }
-            else:
-                reason = result.comment if result else "Unknown MT5 error"
-                logger.error(f"MT5 Order placement failed: {reason}")
-                telegram_notifier.notify_risk_alert("فشل تنفيذ الصفقة", f"فشل فتح صفقة على {resolved_symbol}: {reason}")
-                return {"status": "REJECTED", "reason": reason}
+                result = mt5.order_send(request)
+                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"REAL ORDER FILLED on Exness MT5! Ticket: {result.order}")
+                    telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, result.price, sl_r, tp_r)
+                    return {
+                        "status": "FILLED",
+                        "broker_ticket": result.order,
+                        "fill_price": result.price,
+                        "fill_volume": result.volume,
+                        "slippage": 0.0,
+                        "timestamp": asyncio.get_event_loop().time()
+                    }
+                else:
+                    reason = result.comment if result else "Unknown MT5 error"
+                    logger.error(f"MT5 Order placement failed: {reason}")
+                    telegram_notifier.notify_risk_alert("فشل تنفيذ الصفقة", f"فشل فتح صفقة على {resolved_symbol}: {reason}")
+                    return {"status": "REJECTED", "reason": reason}
 
-        if not self.allow_simulation:
-            logger.error(f"Cannot dispatch real order for {resolved_symbol}: MT5 Terminal is NOT connected and simulation is disabled.")
-            return {"status": "REJECTED", "reason": "MT5 Terminal disconnected (Simulation disabled)"}
+            if not self.allow_simulation:
+                logger.error(f"Cannot dispatch real order for {resolved_symbol}: MT5 Terminal is NOT connected and simulation is disabled.")
+                return {"status": "REJECTED", "reason": "MT5 Terminal disconnected (Simulation disabled)"}
 
-        logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
-        await asyncio.sleep(0.05)
-        return {
-            "status": "FILLED",
-            "broker_ticket": 474251097,
-            "fill_price": price,
-            "fill_volume": volume,
-            "slippage": 0.0,
-            "timestamp": asyncio.get_event_loop().time()
-        }
+            logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
+            return {
+                "status": "FILLED",
+                "broker_ticket": 474251097,
+                "fill_price": price,
+                "fill_volume": volume,
+                "slippage": 0.0,
+                "timestamp": asyncio.get_event_loop().time()
+            }
+
+        return await asyncio.to_thread(_sync_send)
 
     async def close_position(self, ticket: int) -> Dict[str, Any]:
         if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
