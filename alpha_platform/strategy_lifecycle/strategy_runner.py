@@ -339,41 +339,8 @@ class StrategyRunner:
             reverse=True
         )
 
-        # ----------------------------------------------------------------
-        # SIGNALS-ONLY MODE
-        # ----------------------------------------------------------------
-        if self.signals_only_mode:
-            signals_sent = 0
-            try:
-                from alpha_platform.core.telegram_notifier import telegram_notifier
-                for c in selected_candidates:
-                    rr = abs(c.take_profit - c.entry_price) / max(1e-5, abs(c.entry_price - c.stop_loss))
-                    text = (
-                        f"🚨 *إشارة جديدة / NEW SIGNAL* (cycle {cycle_id})\n\n"
-                        f"• {c.strategy_id.replace('_', ' ')}\n"
-                        f"• {c.symbol} — *{c.signal_type.name}*\n"
-                        f"• Entry: `{c.entry_price:.4f}`\n"
-                        f"• SL: `{c.stop_loss:.4f}`\n"
-                        f"• TP: `{c.take_profit:.4f}`\n"
-                        f"• R:R = {rr:.2f}\n"
-                        f"• Grade: {c.quality_grade or 'A+'} | Score: {c.composite_score:.0f}/100\n\n"
-                        f"⏱ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-                    )
-                    if telegram_notifier.is_configured() and telegram_notifier.send_message_sync(text):
-                        signals_sent += 1
-                        self.symbol_cooldowns[c.symbol] = datetime.now(timezone.utc) + timedelta(minutes=15)
-            except Exception as sig_err:
-                logger.error(f"[StrategyRunner] signals-only notification error: {sig_err}")
-            self.last_executed_count = signals_sent
-            return {
-                "cycle": cycle_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "candidates": len(candidates),
-                "approved": len(approved),
-                "executed": signals_sent,
-                "mode": "signals_only",
-            }
-
+        # Direct Execution Dispatch: Only trades approved by Risk Engine and Self-Critic are executed,
+        # and Telegram receives alerts ONLY when an approved trade is actually filled/entered.
         executed = 0
         if self.broker is not None:
             for c in selected_candidates:
@@ -393,6 +360,14 @@ class StrategyRunner:
                 logger.warning(f"[StrategyRunner] cycle={cycle_id}: {len(approved)} approved candidate(s) were NOT executed because broker is None.")
 
         self.last_executed_count = executed
+        return {
+            "cycle": cycle_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "candidates": len(candidates),
+            "approved": len(approved),
+            "executed": executed,
+            "mode": "auto_execution",
+        }
         await self._check_and_apply_breakeven()
         await self._sync_and_notify_closed_positions()
 

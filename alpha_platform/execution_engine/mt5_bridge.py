@@ -200,6 +200,7 @@ class MT5ExecutionBridge:
                 return {"status": "REJECTED", "reason": "MT5 Terminal disconnected (Simulation disabled)"}
 
             logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
+            telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, price, sl, tp)
             return {
                 "status": "FILLED",
                 "broker_ticket": 474251097,
