@@ -27,7 +27,7 @@ validation_gate = StatisticalValidationGate()
 stress_engine = StressTestingEngine()
 execution_tracker = ExecutionQualityTracker()
 ts_store = TimeSeriesDataStore("time_series_data.db")
-mt5_bridge = MT5ExecutionBridge(allow_simulation=True)
+mt5_bridge = MT5ExecutionBridge(allow_simulation=False)
 strategy_runner = StrategyRunner(
     data_store=ts_store,
     risk_engine=risk_engine,
@@ -56,7 +56,7 @@ def seed_historical_bars_if_needed():
                 except Exception as e:
                     logger.warning(f"Failed to fetch MT5 historical seed bars for {symbol}: {e}")
             if not seeded_bars:
-                base = 2650.0 if symbol == "XAUUSD" else (1.0850 if symbol == "EURUSD" else (1.2950 if symbol == "GBPUSD" else 95000.0))
+                base = 4060.0 if symbol == "XAUUSD" else (1.1380 if symbol == "EURUSD" else (1.3320 if symbol == "GBPUSD" else 95000.0))
                 now = datetime.now(timezone.utc)
                 curr_price = base
                 for i in range(60):
@@ -72,7 +72,7 @@ def seed_historical_bars_if_needed():
 async def run_247_data_collector_loop():
     logger.info("🚀 Starting 24/7 Continuous Background Data Collector & Strategy Daemon...")
     seed_historical_bars_if_needed()
-    base_prices = {"XAUUSD": 2650.0, "EURUSD": 1.0850, "GBPUSD": 1.2950, "BTCUSD": 95000.0}
+    base_prices = {"XAUUSD": 4060.0, "EURUSD": 1.1380, "GBPUSD": 1.3320, "BTCUSD": 95000.0}
     
     while True:
         try:

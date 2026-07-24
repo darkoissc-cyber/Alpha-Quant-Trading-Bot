@@ -136,6 +136,10 @@ class MT5ExecutionBridge:
                 telegram_notifier.notify_risk_alert("فشل تنفيذ الصفقة", f"فشل فتح صفقة على {resolved_symbol}: {reason}")
                 return {"status": "REJECTED", "reason": reason}
 
+        if not self.allow_simulation:
+            logger.error(f"Cannot dispatch real order for {resolved_symbol}: MT5 Terminal is NOT connected and simulation is disabled.")
+            return {"status": "REJECTED", "reason": "MT5 Terminal disconnected (Simulation disabled)"}
+
         logger.info(f"Dispatching simulated order to Exness MT5: {resolved_symbol} {signal_type.name} {volume} Lot @ {price}")
         await asyncio.sleep(0.05)
         telegram_notifier.notify_trade_opened(resolved_symbol, signal_type.name, volume, price, sl, tp)
