@@ -54,7 +54,7 @@ strategy_runner = StrategyRunner(
 
 def seed_historical_bars_if_needed():
     from datetime import timedelta
-    for symbol in ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]:
+    for symbol in ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD", "ETHUSD", "SOLUSD"]:
         existing = ts_store.query_candles(symbol, limit=60)
         if len(existing) < 50:
             logger.info(f"Seeding historical bars for {symbol} (currently {len(existing)} bars)...")
@@ -72,7 +72,7 @@ def seed_historical_bars_if_needed():
                 except Exception as e:
                     logger.warning(f"Failed to fetch MT5 historical seed bars for {symbol}: {e}")
             if not seeded_bars:
-                base = 4060.0 if symbol == "XAUUSD" else (1.1380 if symbol == "EURUSD" else (1.3320 if symbol == "GBPUSD" else 95000.0))
+                base = 4060.0 if symbol == "XAUUSD" else (1.1380 if symbol == "EURUSD" else (1.3320 if symbol == "GBPUSD" else (95000.0 if symbol == "BTCUSD" else (3500.0 if symbol == "ETHUSD" else 180.0))))
                 now = datetime.now(timezone.utc)
                 curr_price = base
                 for i in range(60):
@@ -88,7 +88,7 @@ def seed_historical_bars_if_needed():
 async def run_247_data_collector_loop():
     logger.info("🚀 Starting 24/7 Continuous Background Data Collector & Strategy Daemon...")
     seed_historical_bars_if_needed()
-    base_prices = {"XAUUSD": 4060.0, "EURUSD": 1.1380, "GBPUSD": 1.3320, "BTCUSD": 95000.0}
+    base_prices = {"XAUUSD": 4060.0, "EURUSD": 1.1380, "GBPUSD": 1.3320, "BTCUSD": 95000.0, "ETHUSD": 3500.0, "SOLUSD": 180.0}
     
     while True:
         try:

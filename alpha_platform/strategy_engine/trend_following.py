@@ -23,7 +23,7 @@ class TrendFollowingStrategy(BaseStrategy):
             failure_conditions="Tight range-bound consolidation or macro announcement whipsaws.",
             expected_holding_period_bars=24,
             expected_risk_reward_ratio=2.0,
-            target_instruments=["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]
+            target_instruments=["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD", "ETHUSD", "SOLUSD"]
         )
         super().__init__(strategy_id, hypothesis)
         self.ms_analyzer = InstitutionalMarketStructureAnalyzer(swing_window=3)

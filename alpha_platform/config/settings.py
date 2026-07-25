@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     MT5_ACCOUNT_SERVER: str = os.getenv("MT5_ACCOUNT_SERVER", "Exness-MT5Trial15")
     MT5_ZMQ_PUB_PORT: int = 5555  # Python Pub / MT5 Sub
     MT5_ZMQ_REP_PORT: int = 5556  # Python Rep / MT5 Req
-    SUPPORTED_INSTRUMENTS: List[str] = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]
+    SUPPORTED_INSTRUMENTS: List[str] = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD", "ETHUSD", "SOLUSD"]
 
     # Risk Management Governance
     SOFT_DAILY_DRAWDOWN_LIMIT_PCT: float = 1.5   # Automatic risk reduction trigger
@@ -73,7 +73,9 @@ class Settings(BaseSettings):
         "XAUUSD": 50.0,
         "EURUSD": 3.0,
         "GBPUSD": 4.0,
-        "BTCUSD": 500.0
+        "BTCUSD": 500.0,
+        "ETHUSD": 50.0,
+        "SOLUSD": 5.0
     }
 
     # Statistical Validation Standards
