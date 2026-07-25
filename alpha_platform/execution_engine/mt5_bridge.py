@@ -134,16 +134,19 @@ class MT5ExecutionBridge:
             import time
             from datetime import datetime
             
-            # Check if it's weekend (Saturday=5, Sunday=6)
-            if datetime.now().weekday() in [5, 6]:
-                # Cryptos might be open, so we check trade_mode too
-                if "BTC" not in resolved and "ETH" not in resolved:
-                    return False
+            # Check if it's Crypto (BTC, ETH, etc.) - Crypto is ALWAYS open 24/7
+            is_crypto = any(c in resolved.upper() for c in ["BTC", "ETH", "LTC", "XRP", "SOL"])
+            if is_crypto:
+                # For Crypto, we only care if trade_mode is enabled
+                return info.trade_mode in [1, 2, 3]
 
+            # For non-crypto (Forex, Gold), check for weekend (Saturday=5, Sunday=6)
+            if datetime.now().weekday() in [5, 6]:
+                return False
+
+            # If the last tick is more than 1 hour old during market hours, it's likely closed.
             if (time.time() - tick.time) > 3600: # 1 hour
-                # For non-crypto, 1 hour without ticks usually means closed
-                if "BTC" not in resolved and "ETH" not in resolved:
-                    return False
+                return False
                 
             return info.trade_mode in [1, 2, 3] # 4 is close only, usually means market closing/closed
             
