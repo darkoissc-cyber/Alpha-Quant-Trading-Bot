@@ -364,11 +364,11 @@ class StrategyRunner:
                 if sc_ok:
                     logger.info(
                         f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine & "
-                    f"Self-Critic [Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
-                )
-                # CRITICAL FIX 1: Apply scaled position size from risk engine
-                c.volume = risk_verdict.scaled_position_size
-                approved.append(c)
+                        f"Self-Critic [Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
+                    )
+                    # CRITICAL FIX 1: Apply scaled position size from risk engine
+                    c.volume = risk_verdict.scaled_position_size
+                    approved.append(c)
                 else:
                     logger.info(
                         f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Self-Critic: {justification} "
