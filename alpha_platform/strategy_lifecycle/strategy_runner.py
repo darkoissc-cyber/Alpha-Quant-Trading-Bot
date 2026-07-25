@@ -107,7 +107,8 @@ class StrategyRunner:
             if self.broker:
                 is_open = await self.broker.is_market_open(symbol)
                 if not is_open:
-                    logger.debug(f"[StrategyRunner] Skipping {symbol}: Market is currently CLOSED.")
+                    # Log at INFO level so user can see it's working
+                    logger.info(f"[StrategyRunner] Skipping {symbol}: Market is currently CLOSED.")
                     continue
 
             bars = self._load_bars(symbol)
