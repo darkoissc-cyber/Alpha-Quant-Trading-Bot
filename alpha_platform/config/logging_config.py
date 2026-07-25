@@ -50,6 +50,16 @@ def setup_logger(name: str = "AlphaQuant", log_dir: str = "logs") -> logging.Log
             )
             file_handler.setFormatter(JSONFormatter())
             logger.addHandler(file_handler)
+            
+            # 3. Standard Text Log File (Human Readable)
+            text_file_handler = RotatingFileHandler(
+                os.path.join(log_dir, "alpha_platform.log"),
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8"
+            )
+            text_file_handler.setFormatter(console_formatter)
+            logger.addHandler(text_file_handler)
         except Exception as e:
             logger.warning(f"Could not create file log handler: {e}")
             
