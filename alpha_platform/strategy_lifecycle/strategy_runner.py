@@ -93,7 +93,7 @@ class StrategyRunner:
             logger.error(f"[StrategyRunner] Failed to load bars for {symbol}: {e}")
             return []
 
-    def _gather_candidates(self) -> List[TradeCandidate]:
+    async def _gather_candidates(self) -> List[TradeCandidate]:
         candidates: List[TradeCandidate] = []
         now = datetime.now(timezone.utc)
         for symbol in SUPPORTED_SYMBOLS:
@@ -102,6 +102,13 @@ class StrategyRunner:
                 remaining_sec = int((cooldown_until - now).total_seconds())
                 logger.debug(f"[StrategyRunner] Skipping {symbol}: Symbol Cooldown Active ({remaining_sec}s remaining)")
                 continue
+            
+            # Market Status Check: Skip if market is closed (e.g. Gold on weekends)
+            if self.broker:
+                is_open = await self.broker.is_market_open(symbol)
+                if not is_open:
+                    logger.debug(f"[StrategyRunner] Skipping {symbol}: Market is currently CLOSED.")
+                    continue
 
             bars = self._load_bars(symbol)
             if len(bars) < MIN_BARS_REQUIRED:
@@ -287,7 +294,7 @@ class StrategyRunner:
         await self._check_and_apply_breakeven()
         await self._sync_and_notify_closed_positions()
 
-        candidates = self._gather_candidates()
+        candidates = await self._gather_candidates()
         self.last_candidate_count = len(candidates)
         if candidates:
             for c in candidates:

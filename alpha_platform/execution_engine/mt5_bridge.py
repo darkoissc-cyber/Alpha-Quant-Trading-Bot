@@ -106,6 +106,38 @@ class MT5ExecutionBridge:
             return await self.connect()
         return self.connected
 
+    async def is_market_open(self, symbol: str) -> bool:
+        """
+        Checks if the market for the given symbol is currently open on MT5.
+        Returns True if open, False if closed.
+        In simulation mode (no MT5), returns True by default to allow backtesting.
+        """
+        await self.ensure_connected()
+        def _sync_check():
+            if not HAS_MT5_LIB or mt5.terminal_info() is None:
+                # Fallback for cloud/simulation mode: assume open unless we want to implement a calendar.
+                return True
+            
+            resolved = self.resolve_symbol(symbol)
+            info = mt5.symbol_info(resolved)
+            if info is None:
+                return False
+            
+            # Check trade_mode: 0=disabled, 1=long only, 2=short only, 3=full access, 4=close only
+            # Also check if session is active (last tick time)
+            tick = mt5.symbol_info_tick(resolved)
+            if tick is None:
+                return False
+            
+            # If the last tick is more than 24 hours old, market is likely closed.
+            import time
+            if (time.time() - tick.time) > 86400:
+                return False
+                
+            return info.trade_mode in [1, 2, 3, 4]
+            
+        return await asyncio.to_thread(_sync_check)
+
     async def send_order(
         self,
         symbol: str,
