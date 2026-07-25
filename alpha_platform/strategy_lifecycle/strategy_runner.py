@@ -226,16 +226,7 @@ class StrategyRunner:
                     if need_be and open_price:
                         res = await self.broker.modify_order_sltp(ticket=ticket, sl=open_price, tp=pos.get("tp", 0.0))
                         if res.get("status") in ("MODIFIED", "SIMULATED_MODIFIED"):
-                            logger.info(f"🛡️ [Break-Even] Position #{ticket} ({pos.get('symbol')}) moved to Break-Even at {open_price:.4f}!")
-                            # Don't let a Telegram failure break the loop
-                            try:
-                                from alpha_platform.core.telegram_notifier import telegram_notifier
-                                telegram_notifier.notify_risk_alert(
-                                    "تأمين الصفقة تلقائياً (Break-Even)",
-                                    f"تم تحريك إيقاف الخسارة للصفقة #{ticket} على {pos.get('symbol')} إلى سعر الدخول ({open_price:.4f}) لحجز الأرباح وتأمينها بدون مخاطرة!"
-                                )
-                            except Exception as tlg_err:
-                                logger.warning(f"BE Telegram notify failed (non-critical): {tlg_err}")
+                            logger.info(f"[Break-Even] Position #{ticket} ({pos.get('symbol')}) moved to Break-Even at {open_price:.4f}")
         except Exception as e:
             logger.error(f"[StrategyRunner] Error during Break-Even evaluation: {e}")
 
@@ -395,24 +386,7 @@ class StrategyRunner:
             f"signals_only={self.signals_only_mode} "
             f"strategies={[s.strategy_id for s in self.strategies]}"
         )
-        # Send a single boot-up Telegram message so the user can confirm the
-        # bot is alive and the credentials are wired correctly.
-        try:
-            from alpha_platform.core.telegram_notifier import telegram_notifier
-            if telegram_notifier.is_configured():
-                mode = "SIGNALS-ONLY" if self.signals_only_mode else "AUTO-EXECUTE"
-                boot_text = (
-                    f"🤖 *Alpha Quant Online*\n\n"
-                    f"• Mode: *{mode}*\n"
-                    f"• Strategies: 3 (Trend / Breakout / Mean-Rev)\n"
-                    f"• Symbols: XAUUSD, EURUSD, GBPUSD, BTCUSD\n"
-                    f"• Cycle: every {self.interval_seconds}s\n"
-                    f"• Started: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-                    f"You will receive a signal here every time an A+ setup is approved."
-                )
-                telegram_notifier.send_message_sync(boot_text)
-        except Exception as boot_err:
-            logger.warning(f"[StrategyRunner] boot-up Telegram message failed: {boot_err}")
+        # Boot-up Telegram message REMOVED - user only wants trade entry/exit alerts.
 
         while self._running:
             try:

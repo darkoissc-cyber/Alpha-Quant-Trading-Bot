@@ -172,7 +172,6 @@ notified_deal_tickets = set()
 
 async def run_247_mt5_history_deal_sync_loop():
     logger.info("Starting 24/7 Fast MT5 History Deal Close Monitor...")
-    from alpha_platform.core.telegram_notifier import telegram_notifier
     from alpha_platform.execution_engine.mt5_bridge import HAS_MT5_LIB, mt5
     from datetime import timedelta
     
@@ -201,7 +200,7 @@ async def run_247_mt5_history_deal_sync_loop():
                             pnl = float(d.profit + d.swap + d.commission)
                             sym = str(d.symbol).replace("m", "")
                             logger.info(f"[Deal Monitor] Detected closed deal #{d.ticket} on {d.symbol}! PnL: ${pnl:+.2f}")
-                            telegram_notifier.notify_trade_closed(symbol=sym, profit=pnl, pips=0.0)
+                            # Trade closed notification already handled by StrategyRunner position sync
                             notified_deal_tickets.add(d.ticket)
         except asyncio.CancelledError:
             logger.info("Stopping MT5 History Deal Monitor Daemon.")
@@ -406,21 +405,18 @@ def get_strategies() -> List[Dict[str, Any]]:
         }
     ]
 
-from alpha_platform.core.telegram_notifier import telegram_notifier
+# telegram_notifier import moved to where needed for trade alerts only
 
 @app.post("/api/stress-test/run")
 def run_stress_test():
     res = stress_engine.run_stress_test_suite()
-    telegram_notifier.notify_risk_alert("اختبار الإجهاد (Stress Test)", f"تم اجتياز جميع سيناريوهات الإجهاد بنجاح! كسب الفلاش كراش: {res['flash_crash_survival']}")
+    logger.info(f"Stress test completed: flash_crash_survival={res.get('flash_crash_survival')}")
     return res
 
 @app.post("/api/trade/test")
 def trigger_test_trade(symbol: str = "XAUUSD", signal_type: str = "BUY", volume: float = 0.10, price: float = 4050.30):
     sl = price - 20.0 if signal_type.upper() == "BUY" else price + 20.0
     tp = price + 30.0 if signal_type.upper() == "BUY" else price - 30.0
-    
-    # Send Telegram Notification
-    success = telegram_notifier.notify_trade_opened(symbol, signal_type, volume, price, sl, tp)
     
     return {
         "status": "EXECUTED_SIMULATION",
@@ -430,19 +426,12 @@ def trigger_test_trade(symbol: str = "XAUUSD", signal_type: str = "BUY", volume:
         "price": price,
         "sl": sl,
         "tp": tp,
-        "telegram_notified": success
+        "telegram_notified": False  # Test endpoint does not send real trade alerts
     }
 
 @app.post("/api/notify/heartbeat")
 def send_heartbeat_notification():
-    portfolio = get_portfolio_overview()
-    success = telegram_notifier.notify_portfolio_heartbeat(
-        equity=portfolio["equity"],
-        balance=portfolio["balance"],
-        drawdown_pct=portfolio["current_drawdown_pct"],
-        active_positions=portfolio["active_positions_count"]
-    )
-    return {"status": "SUCCESS", "telegram_sent": success, "portfolio": portfolio}
+    return {"status": "DISABLED", "message": "Heartbeat notifications are disabled. You only receive trade entry/exit alerts."}
 
 @app.post("/api/signals/notify")
 def send_custom_signal(
@@ -453,37 +442,11 @@ def send_custom_signal(
     take_profit: float = 0.0,
     note: str = ""
 ):
-    """
-    Manually push a custom trading signal to Telegram.
-    Useful when the operator wants to broadcast a setup the strategy
-    engine didn't pick up, or when running the engine in observation mode.
-    """
-    rr = abs(take_profit - entry_price) / max(1e-5, abs(entry_price - stop_loss)) if stop_loss and entry_price else 0.0
-    text = (
-        f"📣 *إشارة يدوية / MANUAL SIGNAL*\n\n"
-        f"• {symbol} — *{signal_type.upper()}*\n"
-        f"• Entry: `{entry_price}`\n"
-        f"• SL: `{stop_loss}`\n"
-        f"• TP: `{take_profit}`\n"
-        f"• R:R = {rr:.2f}\n"
-        + (f"\n• Note: {note}\n" if note else "")
-        + f"\n⏱ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-    )
-    sent = telegram_notifier.send_message_sync(text)
-    return {"status": "OK" if sent else "FAILED", "telegram_sent": sent, "rr": rr}
+    return {"status": "DISABLED", "message": "Custom signal notifications are disabled. You only receive trade entry/exit alerts."}
 
 @app.post("/api/bot/test-message")
 def send_test_telegram_message(message: str = "✅ Alpha Quant test message: bot is alive and configured."):
-    """
-    Send a free-form test message to the configured Telegram chat. Use this
-    to confirm the bot token + chat id are wired correctly after deployment.
-    """
-    sent = telegram_notifier.send_message_sync(message)
-    return {
-        "status": "OK" if sent else "FAILED",
-        "telegram_sent": sent,
-        "configured": telegram_notifier.is_configured(),
-    }
+    return {"status": "DISABLED", "message": "Test messages are disabled. Telegram only sends trade entry/exit alerts."}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

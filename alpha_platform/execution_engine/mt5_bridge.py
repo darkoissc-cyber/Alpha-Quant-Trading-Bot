@@ -14,7 +14,7 @@ except ImportError:
     mt5 = None
     HAS_MT5_LIB = False
 
-from alpha_platform.core.telegram_notifier import telegram_notifier
+from alpha_platform.core.telegram_notifier import telegram_notifier  # Used for trade open/close alerts only
 
 class BrokerConnectionError(Exception):
     """Raised when broker connection fails in live/production mode."""
@@ -192,7 +192,6 @@ class MT5ExecutionBridge:
                 else:
                     reason = self._sanitize_error(result.comment) if result else "Unknown MT5 error"
                     logger.error(f"MT5 Order placement failed: {reason}")
-                    telegram_notifier.notify_risk_alert("فشل تنفيذ الصفقة", f"فشل فتح صفقة على {resolved_symbol}: {reason}")
                     return {"status": "REJECTED", "reason": reason}
 
             if not self.allow_simulation:
@@ -236,14 +235,10 @@ class MT5ExecutionBridge:
                     return {"status": "CLOSED", "ticket": ticket, "close_price": res.price, "profit": pos.profit}
                 else:
                     # Sanitise error text so we don't leak credentials or other
-                    # sensitive broker-side diagnostics into logs/Telegram.
+                    # sensitive broker-side diagnostics into logs.
                     reason_raw = res.comment if res else "Unknown MT5 close error"
                     reason = self._sanitize_error(reason_raw)
                     logger.error(f"MT5 close position #{ticket} failed: {reason}")
-                    telegram_notifier.notify_risk_alert(
-                        "فشل إغلاق الصفقة",
-                        f"تعذر إغلاق الصفقة رقم {ticket} على {pos.symbol}: {reason}"
-                    )
                     return {"status": "REJECTED", "reason": reason}
 
         # Simulation fallback: do NOT report a fake profit. If the operator

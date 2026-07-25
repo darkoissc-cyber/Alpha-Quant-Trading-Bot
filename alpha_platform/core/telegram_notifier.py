@@ -10,15 +10,14 @@ from alpha_platform.config.logging_config import logger
 
 class TelegramNotifier:
     """
-    Production-grade Telegram notification service for trade alerts,
-    risk triggers, and periodic equity/drawdown heartbeat reports.
+    Production-grade Telegram notification service.
+    ONLY sends alerts when a trade is opened or closed.
+    No heartbeat, no risk alerts, no break-even notifications.
     """
 
     def __init__(self, bot_token: Optional[str] = None, chat_id: Optional[str] = None):
         self.bot_token = bot_token or settings.TELEGRAM_BOT_TOKEN
         self.chat_id = chat_id or settings.TELEGRAM_CHAT_ID
-        # Throttle: ensure at least 50ms between consecutive sends to
-        # protect against floods from upstream loops.
         self._last_send_ts: float = 0.0
         self._min_send_interval_sec: float = 0.05
 
@@ -35,19 +34,16 @@ class TelegramNotifier:
             logger.warning("Telegram Notifier: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured.")
             return False
 
-        # Throttle: don't hammer the API if a flood happens upstream
         now = time.time()
         if now - self._last_send_ts < self._min_send_interval_sec:
             time.sleep(self._min_send_interval_sec - (now - self._last_send_ts))
         self._last_send_ts = time.time()
 
-        # Never log the full bot token. Build URL with masked identifier.
         url = f"https://api.telegram.org/bot{self._masked_token()}/sendMessage"
-        # Send the real URL but log only the masked version if anything fails.
         real_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
-            "text": text[:4096],  # Telegram text length cap
+            "text": text[:4096],
             "parse_mode": parse_mode
         }
 
@@ -63,8 +59,6 @@ class TelegramNotifier:
                     logger.info(f"Telegram notification sent successfully via {self._masked_token()}")
                     return True
                 else:
-                    # Telegram's error response shouldn't include our token,
-                    # but defensively scrub any 32+ char tokens from the log
                     err_text = json.dumps(res_data)
                     import re
                     err_text = re.sub(r"[A-Za-z0-9+/=]{32,}", "[REDACTED]", err_text)
@@ -75,7 +69,6 @@ class TelegramNotifier:
             import re
             err_body = re.sub(r"[A-Za-z0-9+/=]{32,}", "[REDACTED]", err_body)
             logger.error(f"HTTPError sending Telegram notification: {err_body}")
-            # If parse error occurred (e.g. HTTP 400 bad markdown entity), retry with plain text parse_mode=None
             if "can't parse entities" in err_body and parse_mode is not None:
                 logger.info("Retrying Telegram notification in plain text mode (bypassing markdown syntax error)...")
                 return self.send_message_sync(text, parse_mode=None)
@@ -89,9 +82,10 @@ class TelegramNotifier:
         return await loop.run_in_executor(None, self.send_message_sync, text, parse_mode)
 
     def notify_trade_opened(self, symbol: str, signal_type: str, volume: float, price: float, sl: float, tp: float):
+        """ALERT: New trade entry - this is the ONLY alert that fires on open."""
         icon = "🟢" if signal_type.upper() == "BUY" else "🔴"
         text = (
-            f"{icon} *صفقة جديدة - New Trade Alert*\n\n"
+            f"{icon} *فتح صفقة - Trade Opened*\n\n"
             f"• *الرمز (Symbol):* `{symbol}`\n"
             f"• *النوع (Action):* `{signal_type.upper()}`\n"
             f"• *اللوت (Volume):* `{volume}`\n"
@@ -103,6 +97,7 @@ class TelegramNotifier:
         return self.send_message_sync(text)
 
     def notify_trade_closed(self, symbol: str, profit: float, pips: float):
+        """ALERT: Trade closed - this is the ONLY alert that fires on close."""
         icon = "💰" if profit >= 0 else "🔻"
         text = (
             f"{icon} *إغلاق صفقة - Trade Closed*\n\n"
@@ -113,24 +108,7 @@ class TelegramNotifier:
         )
         return self.send_message_sync(text)
 
-    def notify_portfolio_heartbeat(self, equity: float, balance: float, drawdown_pct: float, active_positions: int):
-        text = (
-            f"📊 *تقرير الحالة الدوري - Portfolio Heartbeat*\n\n"
-            f"• *حقوق الملكية (Equity):* `${equity:,.2f}`\n"
-            f"• *الرصيد (Balance):* `${balance:,.2f}`\n"
-            f"• *نسبة التراجع (Drawdown):* `{drawdown_pct:.2f}%`\n"
-            f"• *الصفقات النشطة:* `{active_positions}`\n\n"
-            f"🌐 _System Status: ONLINE (24/7 Monitoring)_"
-        )
-        return self.send_message_sync(text)
-
-    def notify_risk_alert(self, alert_type: str, details: str):
-        text = (
-            f"⚠️ *تنبيه إدارة المخاطر - Risk Alert*\n\n"
-            f"• *نوع التنبيه:* `{alert_type}`\n"
-            f"• *التفاصيل:* {details}\n\n"
-            f"🛡️ _Alpha Quant Risk Engine Authority_"
-        )
-        return self.send_message_sync(text)
+    # REMOVED: notify_portfolio_heartbeat - user only wants trade alerts
+    # REMOVED: notify_risk_alert - user only wants trade alerts
 
 telegram_notifier = TelegramNotifier()
