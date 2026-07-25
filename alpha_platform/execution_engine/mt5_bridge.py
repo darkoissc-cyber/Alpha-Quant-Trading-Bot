@@ -210,10 +210,20 @@ class MT5ExecutionBridge:
                 sl_r = round(float(sl_r), digits)
                 tp_r = round(float(tp_r), digits)
 
+                # CRITICAL FIX: Normalize and round volume to broker requirements
+                # Most brokers (Exness) require volume in steps of 0.01, min 0.01.
+                # Crypto/Gold might have different step/min rules.
+                vol_step = sym_info.volume_step if sym_info is not None else 0.01
+                vol_min = sym_info.volume_min if sym_info is not None else 0.01
+                
+                # Round to nearest step and ensure at least minimum
+                final_volume = round(max(vol_min, (round(volume / vol_step) * vol_step)), 2)
+                logger.info(f"[MT5Bridge] Normalizing volume for {resolved_symbol}: requested={volume}, final={final_volume} (step={vol_step}, min={vol_min})")
+
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
                     "symbol": resolved_symbol,
-                    "volume": volume,
+                    "volume": final_volume,
                     "type": order_type,
                     "price": fill_price_r,
                     "sl": sl_r,
