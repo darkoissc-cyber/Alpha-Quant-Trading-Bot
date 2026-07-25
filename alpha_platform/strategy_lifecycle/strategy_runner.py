@@ -310,28 +310,40 @@ class StrategyRunner:
         from datetime import timedelta
 
         for c in candidates:
+            # 1. Evaluate Risk
             risk_verdict = self._evaluate_risk(c)
+            
+            # 2. Get AI and Self-Critic Evaluation (even if risk fails, to show user quality)
+            ai_prob, ai_real = self._get_ai_calibrated_prob(c)
+            sc_ok, score, grade, justification = self.self_critic.evaluate_and_critique(
+                candidate=c,
+                ai_calibrated_prob=ai_prob,
+                current_spread_pips=1.5 if "USD" in c.symbol and "XAU" not in c.symbol else 15.0,
+                active_positions=active_pos_list,
+                recent_trade_results=self.recent_pnl_window[-5:],
+            )
+            
+            ai_tag = "[AI=real]" if ai_real else "[AI=fallback]"
+            
             if risk_verdict and getattr(risk_verdict, "passed", False):
-                ai_prob, ai_real = self._get_ai_calibrated_prob(c)
-                sc_ok, score, grade, justification = self.self_critic.evaluate_and_critique(
-                    candidate=c,
-                    ai_calibrated_prob=ai_prob,
-                    current_spread_pips=1.5 if "USD" in c.symbol and "XAU" not in c.symbol else 15.0,
-                    active_positions=active_pos_list,
-                    recent_trade_results=self.recent_pnl_window[-5:],
-                )
                 if sc_ok:
-                    ai_tag = "[AI=real]" if ai_real else "[AI=fallback]"
                     logger.info(
                         f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine & "
                         f"Self-Critic [Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
                     )
                     approved.append(c)
                 else:
-                    logger.info(f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Self-Critic: {justification}")
+                    logger.info(
+                        f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Self-Critic: {justification} "
+                        f"[Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
+                    )
             else:
-                reason = getattr(risk_verdict, "rejection_reason", "Risk verdict failed or undefined") if risk_verdict else "Risk evaluation returned None"
-                logger.info(f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Risk Engine: {reason}")
+                # Fix: Use 'veto_reason' instead of 'rejection_reason' as per types.py/RiskCheckResult
+                reason = getattr(risk_verdict, "veto_reason", "Risk evaluation failed") if risk_verdict else "Risk evaluation returned None"
+                logger.info(
+                    f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Risk Engine: {reason}. "
+                    f"Setup Quality: [Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
+                )
 
         self.last_approved_count = len(approved)
 
