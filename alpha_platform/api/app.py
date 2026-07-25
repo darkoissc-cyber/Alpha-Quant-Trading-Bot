@@ -42,7 +42,7 @@ mt5_bridge = MT5ExecutionBridge(allow_simulation=_mt5_sim)
 from alpha_platform.meta_labeling.model_trainer import MetaLabelModelTrainer
 meta_labeler = MetaLabelModelTrainer()
 
-    strategy_runner = StrategyRunner(
+strategy_runner = StrategyRunner(
     data_store=ts_store,
     risk_engine=risk_engine,
     broker=mt5_bridge,
