@@ -129,12 +129,23 @@ class MT5ExecutionBridge:
             if tick is None:
                 return False
             
-            # If the last tick is more than 24 hours old, market is likely closed.
+            # If the last tick is more than 1 hour old during market hours, 
+            # or it's a weekend, it's likely closed.
             import time
-            if (time.time() - tick.time) > 86400:
-                return False
+            from datetime import datetime
+            
+            # Check if it's weekend (Saturday=5, Sunday=6)
+            if datetime.now().weekday() in [5, 6]:
+                # Cryptos might be open, so we check trade_mode too
+                if "BTC" not in resolved and "ETH" not in resolved:
+                    return False
+
+            if (time.time() - tick.time) > 3600: # 1 hour
+                # For non-crypto, 1 hour without ticks usually means closed
+                if "BTC" not in resolved and "ETH" not in resolved:
+                    return False
                 
-            return info.trade_mode in [1, 2, 3, 4]
+            return info.trade_mode in [1, 2, 3] # 4 is close only, usually means market closing/closed
             
         return await asyncio.to_thread(_sync_check)
 
