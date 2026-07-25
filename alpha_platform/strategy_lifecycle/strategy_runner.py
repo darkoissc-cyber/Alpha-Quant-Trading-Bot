@@ -431,10 +431,10 @@ class StrategyRunner:
                         # If conflicting position is losing, mark for recovery monitoring
                         if conflict_pos.get("profit", 0.0) <= 0:
                             recovery_trades_to_monitor.append((c, conflict_pos))
-                            logger.info(f"[Recovery Logic] Identified strong counter-trend signal {c.candidate_id} for {c.symbol} against losing position {conflict_pos.get("ticket")}. Will attempt recovery.")
+                            logger.info(f"[Recovery Logic] Identified strong counter-trend signal {c.candidate_id} for {c.symbol} against losing position {conflict_pos.get('ticket')}. Will attempt recovery.")
                         else:
                             # If conflicting position is profitable, proceed with hedging (normal execution)
-                            logger.info(f"[Recovery Logic] Identified strong counter-trend signal {c.candidate_id} for {c.symbol} against profitable position {conflict_pos.get("ticket")}. Hedging.")
+                            logger.info(f"[Recovery Logic] Identified strong counter-trend signal {c.candidate_id} for {c.symbol} against profitable position {conflict_pos.get('ticket')}. Hedging.")
 
         # Now, create the final list of candidates to execute. Recovery trades should be included.
         # For simplicity, we'll execute all selected candidates, and the recovery logic will manage the losing positions post-execution.
@@ -580,27 +580,27 @@ class StrategyRunner:
                             volume_to_close = old_pos_volume
 
                         if volume_to_close > 0:
-                            logger.info(f"[Recovery Logic] New trade {new_trade_ticket} is profitable (${new_trade_profit:.2f}). Attempting partial close of {volume_to_close:.2f} lots from old losing trade {old_losing_position.get("ticket")}.")
-                            partial_close_result = await self.broker.partial_close_position(old_losing_position.get("ticket"), volume_to_close)
+                            logger.info(f"[Recovery Logic] New trade {new_trade_ticket} is profitable (${new_trade_profit:.2f}). Attempting partial close of {volume_to_close:.2f} lots from old losing trade {old_losing_position.get('ticket')}.")
+                            partial_close_result = await self.broker.partial_close_position(old_losing_position.get('ticket'), volume_to_close)
                             if partial_close_result and partial_close_result.get("status") == "PARTIALLY_CLOSED":
-                                logger.info(f"[Recovery Logic] Successfully partially closed {volume_to_close:.2f} lots from old losing trade {old_losing_position.get("ticket")}.")
+                                logger.info(f"[Recovery Logic] Successfully partially closed {volume_to_close:.2f} lots from old losing trade {old_losing_position.get('ticket')}.")
                                 # Update old_losing_position volume in tracked_positions
-                                self.tracked_positions[old_losing_position.get("ticket")]["volume"] -= volume_to_close
+                                self.tracked_positions[old_losing_position.get('ticket')]["volume"] -= volume_to_close
                                 # Re-save updated position to DB
-                                self.data_store.insert_open_position(self.tracked_positions[old_losing_position.get("ticket")])
+                                self.data_store.insert_open_position(self.tracked_positions[old_losing_position.get('ticket')])
                             else:
-                                logger.error(f"[Recovery Logic] Failed to partially close old losing trade {old_losing_position.get("ticket")}: {partial_close_result.get("reason") if partial_close_result else "Unknown error"}")
+                                logger.error(f"[Recovery Logic] Failed to partially close old losing trade {old_losing_position.get('ticket')}: {partial_close_result.get('reason') if partial_close_result else 'Unknown error'}")
                     elif new_trade_profit >= abs(old_trade_profit): # If new trade profit can cover the entire old loss
-                        logger.info(f"[Recovery Logic] New trade {new_trade_ticket} profit (${new_trade_profit:.2f}) can cover old losing trade {old_losing_position.get("ticket")} loss (${old_trade_profit:.2f}). Closing old trade at market.")
-                        close_result = await self.broker.close_position(old_losing_position.get("ticket"))
+                        logger.info(f"[Recovery Logic] New trade {new_trade_ticket} profit (${new_trade_profit:.2f}) can cover old losing trade {old_losing_position.get('ticket')} loss (${old_trade_profit:.2f}). Closing old trade at market.")
+                        close_result = await self.broker.close_position(old_losing_position.get('ticket'))
                         if close_result and close_result.get("status") == "CLOSED":
-                            logger.info(f"[Recovery Logic] Successfully closed old losing trade {old_losing_position.get("ticket")}.")
+                            logger.info(f"[Recovery Logic] Successfully closed old losing trade {old_losing_position.get('ticket')}.")
                             # Remove from recovery pairs as old trade is closed
                             if new_trade_ticket in self.recovery_pairs:
                                 del self.recovery_pairs[new_trade_ticket]
                         else:
-                            logger.error(f"[Recovery Logic] Failed to close old losing trade {old_losing_position.get("ticket")}: {close_result.get("reason") if close_result else "Unknown error"}")
+                            logger.error(f"[Recovery Logic] Failed to close old losing trade {old_losing_position.get('ticket')}: {close_result.get('reason') if close_result else 'Unknown error'}")
                     else:
-                        logger.debug(f"[Recovery Logic] New trade {new_trade_ticket} profit (${new_trade_profit:.2f}) not yet sufficient to cover old trade {old_losing_position.get("ticket")} loss (${old_trade_profit:.2f}).")
+                        logger.debug(f"[Recovery Logic] New trade {new_trade_ticket} profit (${new_trade_profit:.2f}) not yet sufficient to cover old trade {old_losing_position.get('ticket')} loss (${old_trade_profit:.2f}).")
             else:
                 logger.warning(f"[Recovery Logic] Could not find executed new trade for candidate {new_trade_candidate.candidate_id} to manage recovery.")
