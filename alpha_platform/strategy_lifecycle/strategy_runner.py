@@ -457,7 +457,7 @@ class StrategyRunner:
                         if rec_cand.candidate_id == c.candidate_id:
                             # Store the link between the new profitable trade and the old losing trade
                             self.recovery_pairs[result.get("broker_ticket")] = rec_pos.get("ticket")
-                            logger.info(f"[Recovery Logic] Linked new trade {result.get("broker_ticket")} to old losing trade {rec_pos.get("ticket")}.")
+                            logger.info(f"[Recovery Logic] Linked new trade {result.get('broker_ticket')} to old losing trade {rec_pos.get('ticket')}.")
 
 
                     executed += 1
