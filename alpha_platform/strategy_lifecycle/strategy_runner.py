@@ -28,7 +28,7 @@ from alpha_platform.strategy_engine.mean_reversion import MeanReversionStrategy
 from alpha_platform.risk_engine.python_binding import RiskEngine
 from alpha_platform.execution_engine.mt5_bridge import MT5ExecutionBridge
 
-SUPPORTED_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]
+SUPPORTED_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD", "ETHUSD", "SOLUSD", "LTCUSD"]
 MIN_BARS_REQUIRED = 50
 DEFAULT_INTERVAL_SECONDS = 30
 
