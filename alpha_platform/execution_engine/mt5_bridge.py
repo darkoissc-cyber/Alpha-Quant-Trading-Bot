@@ -372,6 +372,9 @@ class MT5ExecutionBridge:
                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                     logger.info(f"Position #{ticket} SL/TP modified on MT5: SL={sl}, TP={tp}")
                     return {"status": "MODIFIED", "ticket": ticket, "sl": sl, "tp": tp}
+                elif result and "No changes" in result.comment:
+                    logger.debug(f"Position #{ticket} SL/TP already at target values.")
+                    return {"status": "MODIFIED", "ticket": ticket, "sl": sl, "tp": tp, "note": "No changes required"}
                 else:
                     reason = result.comment if result else "Unknown MT5 modify error"
                     logger.error(f"Failed to modify position #{ticket} SL/TP: {reason}")
@@ -427,7 +430,9 @@ class MT5ExecutionBridge:
                             "type": p.type,
                             "sl": p.sl,
                             "tp": p.tp,
-                            "profit": p.profit
+                            "profit": p.profit,
+                            "time_open": datetime.fromtimestamp(p.time, tz=timezone.utc).isoformat(),
+                            "price_current": p.price_current if hasattr(p, 'price_current') else p.price_open
                         }
                         for p in positions
                     ]
