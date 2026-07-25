@@ -42,11 +42,11 @@ mt5_bridge = MT5ExecutionBridge(allow_simulation=_mt5_sim)
 from alpha_platform.meta_labeling.model_trainer import MetaLabelModelTrainer
 meta_labeler = MetaLabelModelTrainer()
 
-strategy_runner = StrategyRunner(
+    strategy_runner = StrategyRunner(
     data_store=ts_store,
     risk_engine=risk_engine,
     broker=mt5_bridge,
-    interval_seconds=30,
+    interval_seconds=10, # INCREASED FREQUENCY: Check every 10s instead of 30s
     max_orders_per_cycle=1,
     meta_labeler=meta_labeler,
     signals_only_mode=_os.getenv("AUTO_TRADE_SIGNALS_ONLY", "false").lower() in ("1", "true", "yes"),
@@ -221,7 +221,7 @@ async def lifespan(app: FastAPI):
         
     collector_task = asyncio.create_task(run_247_data_collector_loop())
     strategy_task = asyncio.create_task(strategy_runner.loop())
-    telegram_task = asyncio.create_task(run_247_telegram_heartbeat_loop())
+    # telegram_task = asyncio.create_task(run_247_telegram_heartbeat_loop()) # DISABLED: User only wants trade alerts
     deal_task = asyncio.create_task(run_247_mt5_history_deal_sync_loop())
     logger.info("StrategyRunner, MT5Bridge, DealMonitor & Telegram 24/7 Daemon registered in lifespan")
     try:
