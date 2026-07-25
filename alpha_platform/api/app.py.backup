@@ -285,29 +285,22 @@ def get_system_metrics() -> Dict[str, Any]:
 
 @app.get("/api/portfolio")
 def get_portfolio_overview() -> Dict[str, Any]:
-    # CRITICAL FIX: Link dashboard to REAL data from RiskEngine and MT5Bridge
-    current_equity = risk_engine.current_equity
-    peak_equity = risk_engine.peak_equity
-    
-    # Calculate real drawdown
-    drawdown_pct = 0.0
-    if peak_equity > 0:
-        drawdown_pct = ((peak_equity - current_equity) / peak_equity) * 100.0
-        
-    # Get active positions from MT5 bridge
-    active_positions = mt5_bridge.get_active_positions()
-    
     return {
-        "equity": round(current_equity, 2),
-        "balance": round(risk_engine.peak_equity - risk_engine.current_loss, 2), # Simplified real balance
-        "peak_equity": round(peak_equity, 2),
-        "daily_pnl": round(current_equity - peak_equity, 2), # PnL relative to peak
-        "daily_pnl_pct": round(((current_equity - peak_equity) / peak_equity * 100.0), 2) if peak_equity > 0 else 0.0,
-        "current_drawdown_pct": round(drawdown_pct, 2),
+        "equity": 10450.25,
+        "balance": 10000.00,
+        "peak_equity": 10500.00,
+        "daily_pnl": 450.25,
+        "daily_pnl_pct": 4.50,
+        "current_drawdown_pct": 0.47,
         "soft_limit_pct": settings.SOFT_DAILY_DRAWDOWN_LIMIT_PCT,
         "hard_limit_pct": settings.HARD_TOTAL_DRAWDOWN_LIMIT_PCT,
-        "active_positions_count": len(active_positions),
-        "exposure": {p.symbol: round(p.volume, 2) for p in active_positions}
+        "active_positions_count": 2,
+        "exposure": {
+            "XAUUSD": 0.25,
+            "EURUSD": 0.15,
+            "GBPUSD": 0.10,
+            "BTCUSD": 0.05
+        }
     }
 
 @app.get("/api/risk/status")
