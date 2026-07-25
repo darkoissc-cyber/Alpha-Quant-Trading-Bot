@@ -21,12 +21,12 @@ from alpha_platform.strategy_lifecycle.strategy_runner import StrategyRunner
 from alpha_platform.execution_engine.mt5_bridge import MT5ExecutionBridge, HAS_MT5_LIB, mt5
 
 # Global Instance State
+ts_store = TimeSeriesDataStore("time_series_data.db")
 risk_engine = RiskEngine(initial_equity=10000.0, data_store=ts_store)
 model_registry = ModelRegistry()
 validation_gate = StatisticalValidationGate()
 stress_engine = StressTestingEngine()
 execution_tracker = ExecutionQualityTracker()
-ts_store = TimeSeriesDataStore("time_series_data.db")
 # Auto-enable simulation mode on platforms where the MetaTrader5 native
 # library is unavailable (Linux/Docker/Render). On Windows desktop with
 # MT5 installed, the real broker will be used automatically.
