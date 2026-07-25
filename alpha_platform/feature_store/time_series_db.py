@@ -63,6 +63,34 @@ class TimeSeriesDataStore:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_features_sym_ts ON feature_snapshots(symbol, timestamp);")
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS open_positions (
+                    ticket INTEGER PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    type INTEGER NOT NULL,
+                    volume REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    current_price REAL,
+                    sl REAL,
+                    tp REAL,
+                    timestamp TEXT NOT NULL,
+                    profit REAL,
+                    magic INTEGER
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_open_positions_symbol ON open_positions(symbol);")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS risk_state (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    peak_equity REAL NOT NULL,
+                    day_start_equity REAL NOT NULL,
+                    week_start_equity REAL NOT NULL,
+                    month_start_equity REAL NOT NULL,
+                    emergency_kill_active INTEGER NOT NULL
+                )
+            """)
+
     def insert_ticks(self, ticks: List[Tick]):
         if not ticks:
             return
@@ -145,6 +173,58 @@ class TimeSeriesDataStore:
                     symbol=r[0], timestamp=ts, open=r[2], high=r[3], low=r[4], close=r[5], volume=r[6], tick_count=r[7]
                 ))
         return bars
+
+    def insert_open_position(self, position: Dict[str, Any]):
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO open_positions (
+                    ticket, symbol, type, volume, entry_price, current_price, sl, tp, timestamp, profit, magic
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position.get("ticket"), position.get("symbol"), position.get("type"), position.get("volume"),
+                position.get("price_open"), position.get("price_current"), position.get("sl"), position.get("tp"),
+                position.get("time_open"), position.get("profit"), position.get("magic")
+            ))
+
+    def delete_open_position(self, ticket: int):
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM open_positions WHERE ticket = ?", (ticket,))
+
+    def get_open_positions(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT ticket, symbol, type, volume, entry_price, current_price, sl, tp, timestamp, profit, magic FROM open_positions")
+            rows = cursor.fetchall()
+            positions = []
+            for r in rows:
+                positions.append({
+                    "ticket": r[0], "symbol": r[1], "type": r[2], "volume": r[3], "price_open": r[4],
+                    "price_current": r[5], "sl": r[6], "tp": r[7], "time_open": r[8], "profit": r[9], "magic": r[10]
+                })
+            return positions
+
+    def save_risk_state(self, peak_equity: float, day_start_equity: float, week_start_equity: float, month_start_equity: float, emergency_kill_active: bool):
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO risk_state (
+                    id, peak_equity, day_start_equity, week_start_equity, month_start_equity, emergency_kill_active
+                ) VALUES (1, ?, ?, ?, ?, ?)
+            """, (peak_equity, day_start_equity, week_start_equity, month_start_equity, int(emergency_kill_active)))
+
+    def load_risk_state(self) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT peak_equity, day_start_equity, week_start_equity, month_start_equity, emergency_kill_active FROM risk_state WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "peak_equity": row[0],
+                    "day_start_equity": row[1],
+                    "week_start_equity": row[2],
+                    "month_start_equity": row[3],
+                    "emergency_kill_active": bool(row[4])
+                }
+            return None
 
 class FeatureCacheEngine:
     """

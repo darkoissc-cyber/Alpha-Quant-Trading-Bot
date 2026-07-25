@@ -17,7 +17,8 @@ class RiskEngine:
     Correlation Matrix vetoes, Periodic Risk Budgets, Dynamic Position Scaling, and Real-Time News Window Vetoes.
     """
 
-    def __init__(self, initial_equity: float = 10000.0, news_filter: Optional[NewsFilter] = None):
+    def __init__(self, initial_equity: float = 10000.0, news_filter: Optional[NewsFilter] = None, data_store=None):
+        self.data_store = data_store
         self.peak_equity = initial_equity
         self.day_start_equity = initial_equity
         self.week_start_equity = initial_equity
@@ -34,6 +35,24 @@ class RiskEngine:
             max_consecutive_losses=3
         )
         self.position_risk_manager = DynamicPositionRiskManager()
+
+    def load_state(self):
+        if self.data_store:
+            state = self.data_store.load_risk_state()
+            if state:
+                self.peak_equity = state["peak_equity"]
+                self.day_start_equity = state["day_start_equity"]
+                self.week_start_equity = state["week_start_equity"]
+                self.month_start_equity = state["month_start_equity"]
+                self.emergency_kill_active = state["emergency_kill_active"]
+                logger.info(f"[RiskEngine] Loaded state: Peak Equity={self.peak_equity}")
+
+    def save_state(self):
+        if self.data_store:
+            self.data_store.save_risk_state(
+                self.peak_equity, self.day_start_equity, self.week_start_equity, self.month_start_equity, self.emergency_kill_active
+            )
+            logger.info("[RiskEngine] Saved state to database.")
 
     def reset_daily_equity(self, current_equity: float):
         self.day_start_equity = current_equity

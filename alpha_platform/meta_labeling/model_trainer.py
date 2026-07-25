@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import joblib
 from typing import Dict, List, Any, Optional, Tuple
 from sklearn.ensemble import GradientBoostingClassifier
 from alpha_platform.meta_labeling.purged_cv import PurgedGroupTimeSeriesSplit
@@ -57,3 +58,23 @@ class MetaLabelModelTrainer:
         is_approved = calibrated_prob >= self.min_confidence_threshold
 
         return is_approved, raw_prob, calibrated_prob
+
+    def save_model(self, path: str):
+        if self.model:
+            joblib.dump(self.model, path)
+            joblib.dump(self.calibrator, path.replace('.joblib', '_calibrator.joblib'))
+            joblib.dump(self.feature_names, path.replace('.joblib', '_features.joblib'))
+            logger.info(f"Meta-labeling model, calibrator, and feature names saved to {path}")
+        else:
+            logger.warning("Cannot save untrained meta-labeling model.")
+
+    def load_model(self, path: str):
+        try:
+            self.model = joblib.load(path)
+            self.calibrator = joblib.load(path.replace('.joblib', '_calibrator.joblib'))
+            self.feature_names = joblib.load(path.replace('.joblib', '_features.joblib'))
+            logger.info(f"Meta-labeling model, calibrator, and feature names loaded from {path}")
+        except FileNotFoundError:
+            logger.warning(f"Meta-labeling model file not found at {path}. Model will remain untrained.")
+        except Exception as e:
+            logger.error(f"Error loading meta-labeling model from {path}: {e}")

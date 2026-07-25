@@ -57,13 +57,8 @@ class StrategyRunner:
         # Optional real meta-labeler; if absent, the AI gate is honestly
         # bypassed (logged) rather than being silently replaced by a constant.
         self.meta_labeler = meta_labeler
-        # Signals-only mode: skip broker dispatch and only push approved
-        # candidates to Telegram. The trader executes the trade manually
-        # in their MT5 terminal. Default: False (auto-execute on broker).
-        self.signals_only_mode = bool(
-            signals_only_mode
-            or os.getenv("AUTO_TRADE_SIGNALS_ONLY", "false").lower() in ("1", "true", "yes")
-        )
+        # Full auto-execution mode: broker dispatch is mandatory for approved candidates.
+        self.signals_only_mode = False
 
         self.strategies = [
             TrendFollowingStrategy(),
@@ -76,6 +71,8 @@ class StrategyRunner:
         self.last_approved_count = 0
         self.last_executed_count = 0
         self.tracked_positions: Dict[int, Dict[str, Any]] = {}
+        self.recovery_pairs: Dict[int, int] = {} # {new_trade_ticket: old_losing_trade_ticket}
+        self.data_store = data_store # Ensure data_store is accessible here
         self.symbol_cooldowns: Dict[str, datetime] = {}
         # Track recent realised P&L for the Revenge-Trade Guard in SelfCritic
         self.recent_pnl_window: List[float] = []
@@ -119,6 +116,9 @@ class StrategyRunner:
                 try:
                     new = strat.generate_candidates(symbol, bars)
                     if new:
+                        for cand in new:
+                            # Initialize volume to a default, will be updated by risk engine
+                            cand.volume = 0.01 # Default volume, will be overwritten by risk engine
                         candidates.extend(new)
                 except Exception as e:
                     logger.error(f"[StrategyRunner] {strat.strategy_id} failed on {symbol}: {e}")
@@ -196,7 +196,7 @@ class StrategyRunner:
             result = await self.broker.send_order(
                 symbol=candidate.symbol,
                 signal_type=candidate.signal_type,
-                volume=0.01,
+                volume=candidate.volume,
                 price=candidate.entry_price,
                 sl=candidate.stop_loss,
                 tp=candidate.take_profit,
@@ -253,13 +253,28 @@ class StrategyRunner:
                 symbol = pos_info.get("symbol", "UNKNOWN")
                 profit = pos_info.get("profit", 0.0)
                 
+                # Fetch actual PnL from MT5 if available, otherwise use stored profit
+                actual_profit = pos_info.get("profit", 0.0)
                 if HAS_MT5_LIB and mt5.terminal_info() is not None:
                     try:
                         deals = mt5.history_deals_get(position=ticket)
                         if deals and len(deals) > 0:
-                            profit = sum(d.profit + d.swap + d.commission for d in deals)
+                            actual_profit = sum(d.profit + d.swap + d.commission for d in deals)
                     except Exception as err:
                         logger.warning(f"Could not query MT5 history deals for ticket {ticket}: {err}")
+                profit = actual_profit
+
+                # If this closed trade was part of a recovery pair, remove the link
+                if ticket in self.recovery_pairs:
+                    del self.recovery_pairs[ticket]
+                    logger.info(f"[Recovery Logic] Removed recovery link for closed trade {ticket}.")
+
+                # If this closed trade was the old losing trade in a recovery pair, also remove its link
+                for new_ticket, old_ticket in list(self.recovery_pairs.items()):
+                    if old_ticket == ticket:
+                        del self.recovery_pairs[new_ticket]
+                        logger.info(f"[Recovery Logic] Removed recovery link for old closed trade {ticket}.")
+
                 
                 logger.info(f"🔔 [Position Tracker] Position #{ticket} ({symbol}) closed on broker. PnL: ${profit:+.2f}")
                 from alpha_platform.core.telegram_notifier import telegram_notifier
@@ -280,10 +295,27 @@ class StrategyRunner:
                     del self.symbol_cooldowns[symbol]
 
                 del self.tracked_positions[ticket]
+                self.data_store.delete_open_position(ticket)
+
+                # If this closed trade was part of a recovery pair, remove the link
+                if ticket in self.recovery_pairs:
+                    del self.recovery_pairs[ticket]
+                    logger.info(f"[Recovery Logic] Removed recovery link for closed trade {ticket}.")
+
+                # If this closed trade was the old losing trade in a recovery pair, also remove its link
+                for new_ticket, old_ticket in list(self.recovery_pairs.items()):
+                    if old_ticket == ticket:
+                        del self.recovery_pairs[new_ticket]
+                        logger.info(f"[Recovery Logic] Removed recovery link for old closed trade {ticket}.")
+
                 
             # Update tracked positions with current live positions
             for ticket, pos in current_live_map.items():
                 self.tracked_positions[ticket] = pos
+                # Update profit and current price for persistence
+                pos["profit"] = pos.get("profit", 0.0) # Ensure profit field exists
+                pos["price_current"] = pos.get("price_current", pos.get("price_open")) # Ensure current price exists
+                self.data_store.insert_open_position(pos)
         except Exception as e:
             logger.error(f"[StrategyRunner] Position reconciliation error: {e}")
 
@@ -294,6 +326,9 @@ class StrategyRunner:
         # 1. Run Break-Even management on open positions and sync closed trades FIRST
         await self._check_and_apply_breakeven()
         await self._sync_and_notify_closed_positions()
+
+        # CRITICAL FIX: Update current prices and profits for all tracked positions
+        await self._update_tracked_positions_live_data()
 
         candidates = await self._gather_candidates()
         self.last_candidate_count = len(candidates)
@@ -329,9 +364,11 @@ class StrategyRunner:
                 if sc_ok:
                     logger.info(
                         f"[StrategyRunner] Candidate {c.candidate_id} APPROVED by Risk Engine & "
-                        f"Self-Critic [Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
-                    )
-                    approved.append(c)
+                    f"Self-Critic [Grade {grade}, Score {score:.0f}/100, {ai_tag}]."
+                )
+                # CRITICAL FIX 1: Apply scaled position size from risk engine
+                c.volume = risk_verdict.scaled_position_size
+                approved.append(c)
                 else:
                     logger.info(
                         f"[StrategyRunner] Candidate {c.candidate_id} REJECTED by Self-Critic: {justification} "
@@ -371,10 +408,58 @@ class StrategyRunner:
         # Direct Execution Dispatch: Only trades approved by Risk Engine and Self-Critic are executed,
         # and Telegram receives alerts ONLY when an approved trade is actually filled/entered.
         executed = 0
+        
+        # Implement Recovery Logic for strong counter-trend signals
+        recovery_trades_to_monitor = []
+
+        # First, identify all potential recovery trades
+        for c in selected_candidates:
+            # Check if this is a strong counter-trend signal
+            is_strong_signal = (getattr(c, "ai_calibrated_prob", 0.0) > 0.95 and getattr(c, "composite_score", 0.0) > 90)
+            
+            if is_strong_signal:
+                # Look for conflicting open positions on the same symbol
+                conflicting_positions = [
+                    pos for pos in active_pos_list
+                    if pos.get("symbol") == c.symbol and 
+                       ((c.signal_type == SignalType.BUY and pos.get("type") == 1) or 
+                        (c.signal_type == SignalType.SELL and pos.get("type") == 0))
+                ]
+                
+                if conflicting_positions:
+                    for conflict_pos in conflicting_positions:
+                        # If conflicting position is losing, mark for recovery monitoring
+                        if conflict_pos.get("profit", 0.0) <= 0:
+                            recovery_trades_to_monitor.append((c, conflict_pos))
+                            logger.info(f"[Recovery Logic] Identified strong counter-trend signal {c.candidate_id} for {c.symbol} against losing position {conflict_pos.get("ticket")}. Will attempt recovery.")
+                        else:
+                            # If conflicting position is profitable, proceed with hedging (normal execution)
+                            logger.info(f"[Recovery Logic] Identified strong counter-trend signal {c.candidate_id} for {c.symbol} against profitable position {conflict_pos.get("ticket")}. Hedging.")
+
+        # Now, create the final list of candidates to execute. Recovery trades should be included.
+        # For simplicity, we'll execute all selected candidates, and the recovery logic will manage the losing positions post-execution.
+        # If a candidate is part of a recovery, it will be handled by _manage_losing_recovery.
+            
+        # New method to manage losing positions with new profitable counter-trades
+        await self._manage_losing_recovery(recovery_trades_to_monitor)
+
         if self.broker is not None:
             for c in selected_candidates:
                 result = await self._execute(c)
                 if result and result.get("status") in ("FILLED", "SIMULATED_FILLED"):
+                    # Update current price for tracked position
+                    if result.get("broker_ticket") in self.tracked_positions:
+                        self.tracked_positions[result.get("broker_ticket")]["price_current"] = result.get("fill_price")
+                        self.tracked_positions[result.get("broker_ticket")]["profit"] = 0.0 # Reset profit for new position
+                    
+                    # Check if this executed trade is part of a recovery strategy
+                    for rec_cand, rec_pos in recovery_trades_to_monitor:
+                        if rec_cand.candidate_id == c.candidate_id:
+                            # Store the link between the new profitable trade and the old losing trade
+                            self.recovery_pairs[result.get("broker_ticket")] = rec_pos.get("ticket")
+                            logger.info(f"[Recovery Logic] Linked new trade {result.get("broker_ticket")} to old losing trade {rec_pos.get("ticket")}.")
+
+
                     executed += 1
                     self.symbol_cooldowns[c.symbol] = datetime.now(timezone.utc) + timedelta(minutes=15)
                     logger.info(
@@ -426,3 +511,96 @@ class StrategyRunner:
 
     def stop(self) -> None:
         self._running = False
+
+    async def load_tracked_positions(self):
+        if self.data_store:
+            positions = self.data_store.get_open_positions()
+            for pos in positions:
+                self.tracked_positions[pos["ticket"]] = pos
+            logger.info(f"[StrategyRunner] Loaded {len(positions)} tracked positions from database.")
+            # Re-establish recovery pairs if any (requires more complex logic, for now assume fresh start on recovery pairs)
+
+    async def save_tracked_positions(self):
+        # Positions are saved incrementally in _sync_and_notify_closed_positions
+        # This method is primarily for ensuring any remaining open positions are saved on shutdown
+        if self.data_store:
+            for ticket, pos in self.tracked_positions.items():
+                self.data_store.insert_open_position(pos)
+            logger.info(f"[StrategyRunner] Saved {len(self.tracked_positions)} tracked positions to database on shutdown.")
+
+    async def _update_tracked_positions_live_data(self):
+        if self.broker is None:
+            return
+        try:
+            live_positions = await self.broker.get_active_positions()
+            live_map = {pos["ticket"]: pos for pos in live_positions if "ticket" in pos}
+            
+            for ticket, tracked_pos in self.tracked_positions.items():
+                if ticket in live_map:
+                    live_pos = live_map[ticket]
+                    # Update current price and profit from live data
+                    tracked_pos["price_current"] = live_pos.get("price_current", tracked_pos.get("price_open"))
+                    tracked_pos["profit"] = live_pos.get("profit", 0.0)
+                    self.data_store.insert_open_position(tracked_pos) # Persist updated live data
+        except Exception as e:
+            logger.error(f"[StrategyRunner] Error updating live data for tracked positions: {e}")
+
+    async def _manage_losing_recovery(self, recovery_trades: List[Tuple[TradeCandidate, Dict[str, Any]]]):
+        if self.broker is None:
+            return
+        
+        for new_trade_candidate, old_losing_position in recovery_trades:
+            # Find the actual executed new trade from tracked_positions
+            new_trade_ticket = None
+            for ticket, pos in self.tracked_positions.items():
+                if pos.get("symbol") == new_trade_candidate.symbol and \
+                   pos.get("type") == (0 if new_trade_candidate.signal_type == SignalType.BUY else 1) and \
+                   abs(pos.get("price_open", 0.0) - new_trade_candidate.entry_price) < 0.0001: # Small tolerance for price match
+                    new_trade_ticket = ticket
+                    break
+            
+            if new_trade_ticket and new_trade_ticket in self.tracked_positions:
+                new_trade_pos = self.tracked_positions[new_trade_ticket]
+                new_trade_profit = new_trade_pos.get("profit", 0.0)
+                old_trade_profit = old_losing_position.get("profit", 0.0)
+
+                # If the new trade is profitable and the old trade is still losing
+                if new_trade_profit > 0.0 and old_trade_profit < 0.0:
+                    # Calculate how much of the old loss can be covered by the new profit
+                    # We need to estimate PnL per lot for the old losing position to determine volume to close.
+                    # For simplicity, let's assume a fixed partial close volume if new trade is profitable.
+                    # User requested: "قلل مقدار الخساره اكبر ما يمكن بس بشرط اذا الصفقه الجديده الي انتا فتها صارت تطلع ربح و لو صغير"
+                    # This implies a gradual reduction or full close if profit allows.
+
+                    old_pos_volume = old_losing_position.get("volume", 0.0)
+                    if old_pos_volume > 0.01 and new_trade_profit >= 0.10: # If new trade has at least $0.10 profit and old trade has volume to partially close
+                        # Close a small portion of the losing trade, e.g., 10% of its current volume, or 0.01 lot, whichever is smaller but not zero.
+                        volume_to_close = max(0.01, round(old_pos_volume * 0.1, 2))
+                        if volume_to_close > old_pos_volume: # Don't close more than available
+                            volume_to_close = old_pos_volume
+
+                        if volume_to_close > 0:
+                            logger.info(f"[Recovery Logic] New trade {new_trade_ticket} is profitable (${new_trade_profit:.2f}). Attempting partial close of {volume_to_close:.2f} lots from old losing trade {old_losing_position.get("ticket")}.")
+                            partial_close_result = await self.broker.partial_close_position(old_losing_position.get("ticket"), volume_to_close)
+                            if partial_close_result and partial_close_result.get("status") == "PARTIALLY_CLOSED":
+                                logger.info(f"[Recovery Logic] Successfully partially closed {volume_to_close:.2f} lots from old losing trade {old_losing_position.get("ticket")}.")
+                                # Update old_losing_position volume in tracked_positions
+                                self.tracked_positions[old_losing_position.get("ticket")]["volume"] -= volume_to_close
+                                # Re-save updated position to DB
+                                self.data_store.insert_open_position(self.tracked_positions[old_losing_position.get("ticket")])
+                            else:
+                                logger.error(f"[Recovery Logic] Failed to partially close old losing trade {old_losing_position.get("ticket")}: {partial_close_result.get("reason") if partial_close_result else "Unknown error"}")
+                    elif new_trade_profit >= abs(old_trade_profit): # If new trade profit can cover the entire old loss
+                        logger.info(f"[Recovery Logic] New trade {new_trade_ticket} profit (${new_trade_profit:.2f}) can cover old losing trade {old_losing_position.get("ticket")} loss (${old_trade_profit:.2f}). Closing old trade at market.")
+                        close_result = await self.broker.close_position(old_losing_position.get("ticket"))
+                        if close_result and close_result.get("status") == "CLOSED":
+                            logger.info(f"[Recovery Logic] Successfully closed old losing trade {old_losing_position.get("ticket")}.")
+                            # Remove from recovery pairs as old trade is closed
+                            if new_trade_ticket in self.recovery_pairs:
+                                del self.recovery_pairs[new_trade_ticket]
+                        else:
+                            logger.error(f"[Recovery Logic] Failed to close old losing trade {old_losing_position.get("ticket")}: {close_result.get("reason") if close_result else "Unknown error"}")
+                    else:
+                        logger.debug(f"[Recovery Logic] New trade {new_trade_ticket} profit (${new_trade_profit:.2f}) not yet sufficient to cover old trade {old_losing_position.get("ticket")} loss (${old_trade_profit:.2f}).")
+            else:
+                logger.warning(f"[Recovery Logic] Could not find executed new trade for candidate {new_trade_candidate.candidate_id} to manage recovery.")

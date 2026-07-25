@@ -21,7 +21,7 @@ from alpha_platform.strategy_lifecycle.strategy_runner import StrategyRunner
 from alpha_platform.execution_engine.mt5_bridge import MT5ExecutionBridge, HAS_MT5_LIB, mt5
 
 # Global Instance State
-risk_engine = RiskEngine(initial_equity=10000.0)
+risk_engine = RiskEngine(initial_equity=10000.0, data_store=ts_store)
 model_registry = ModelRegistry()
 validation_gate = StatisticalValidationGate()
 stress_engine = StressTestingEngine()
@@ -41,6 +41,7 @@ mt5_bridge = MT5ExecutionBridge(allow_simulation=_mt5_sim)
 # CRITICAL FIX: Inject a trained MetaLabelModelTrainer into StrategyRunner so the AI gate is active.
 from alpha_platform.meta_labeling.model_trainer import MetaLabelModelTrainer
 meta_labeler = MetaLabelModelTrainer()
+MODEL_PATH = "./meta_labeler_model.joblib"
 
 strategy_runner = StrategyRunner(
     data_store=ts_store,
@@ -49,7 +50,7 @@ strategy_runner = StrategyRunner(
     interval_seconds=10, # INCREASED FREQUENCY: Check every 10s instead of 30s
     max_orders_per_cycle=1,
     meta_labeler=meta_labeler,
-    signals_only_mode=_os.getenv("AUTO_TRADE_SIGNALS_ONLY", "false").lower() in ("1", "true", "yes"),
+    signals_only_mode=False,
 )
 
 def seed_historical_bars_if_needed():
@@ -215,6 +216,39 @@ async def lifespan(app: FastAPI):
     try:
         connected = await mt5_bridge.connect()
         logger.info(f"MT5 Execution Bridge connected: {connected}")
+
+        # Load risk state on startup
+        risk_engine.load_state()
+        # Load open positions on startup
+        await strategy_runner.load_tracked_positions()
+
+        # Load meta-labeling model
+        meta_labeler.load_model(MODEL_PATH)
+        # Placeholder for training if no model is found. In a real system, this would be a separate pipeline.
+        if meta_labeler.model is None:
+            logger.warning("No meta-labeling model found. Attempting to train a dummy model for demonstration.")
+            # This is a simplified dummy training. Real training needs proper features and labels.
+            # For now, we'll just create some dummy data to get a model trained.
+            from alpha_platform.core.types import Bar, SignalType, TradeCandidate
+            import pandas as pd
+            import numpy as np
+            from datetime import datetime, timedelta, timezone
+
+            # Generate dummy features and labels
+            num_samples = 100
+            dummy_features = {
+                'feature_1': np.random.rand(num_samples),
+                'feature_2': np.random.rand(num_samples) * 10,
+                'feature_3': np.random.randint(0, 2, num_samples),
+            }
+            dummy_X = pd.DataFrame(dummy_features)
+            dummy_y = pd.Series(np.random.randint(0, 2, num_samples))
+
+            try:
+                meta_labeler.train(dummy_X, dummy_y)
+                meta_labeler.save_model(MODEL_PATH)
+            except Exception as e:
+                logger.error(f"Failed to train dummy meta-labeling model: {e}")
     except Exception as e:
         logger.error(f"MT5 Execution Bridge connection error: {e}")
         
@@ -227,6 +261,13 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         strategy_runner.stop()
+        # Save risk state on shutdown
+        risk_engine.save_state()
+        # Save open positions on shutdown
+        await strategy_runner.save_tracked_positions()
+
+        # Save meta-labeling model
+        meta_labeler.save_model(MODEL_PATH)
         for t in (collector_task, strategy_task, telegram_task, deal_task):
             t.cancel()
             try:
