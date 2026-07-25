@@ -137,8 +137,9 @@ class MT5ExecutionBridge:
             # Check if it's Crypto (BTC, ETH, etc.) - Crypto is ALWAYS open 24/7
             is_crypto = any(c in resolved.upper() for c in ["BTC", "ETH", "LTC", "XRP", "SOL"])
             if is_crypto:
-                # For Crypto, we only care if trade_mode is enabled
-                return info.trade_mode in [1, 2, 3]
+                # For Crypto, we allow trade_mode 4 (Close Only) for analysis, 
+                # as some brokers use it during weekend maintenance but prices still move.
+                return info.trade_mode in [1, 2, 3, 4]
 
             # For non-crypto (Forex, Gold), check for weekend (Saturday=5, Sunday=6)
             if datetime.now().weekday() in [5, 6]:
