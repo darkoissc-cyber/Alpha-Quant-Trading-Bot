@@ -268,7 +268,7 @@ async def lifespan(app: FastAPI):
 
         # Save meta-labeling model
         meta_labeler.save_model(MODEL_PATH)
-        for t in (collector_task, strategy_task, telegram_task, deal_task):
+        for t in (collector_task, strategy_task, deal_task):
             t.cancel()
             try:
                 await t
@@ -324,10 +324,11 @@ def get_system_metrics() -> Dict[str, Any]:
     return metrics_collector.get_summary()
 
 @app.get("/api/portfolio")
-def get_portfolio_overview() -> Dict[str, Any]:
-    # CRITICAL FIX: Link dashboard to REAL data from RiskEngine and MT5Bridge
-    current_equity = risk_engine.current_equity
+async def get_portfolio_overview() -> Dict[str, Any]:
+    # Calculate current equity based on peak and recent PnL
     peak_equity = risk_engine.peak_equity
+    realised_pnl = sum(strategy_runner.recent_pnl_window)
+    current_equity = peak_equity + realised_pnl
     
     # Calculate real drawdown
     drawdown_pct = 0.0
@@ -335,19 +336,19 @@ def get_portfolio_overview() -> Dict[str, Any]:
         drawdown_pct = ((peak_equity - current_equity) / peak_equity) * 100.0
         
     # Get active positions from MT5 bridge
-    active_positions = mt5_bridge.get_active_positions()
+    active_positions = await mt5_bridge.get_active_positions()
     
     return {
         "equity": round(current_equity, 2),
-        "balance": round(risk_engine.peak_equity - risk_engine.current_loss, 2), # Simplified real balance
+        "balance": round(current_equity, 2), # Using equity as balance for simplicity
         "peak_equity": round(peak_equity, 2),
-        "daily_pnl": round(current_equity - peak_equity, 2), # PnL relative to peak
-        "daily_pnl_pct": round(((current_equity - peak_equity) / peak_equity * 100.0), 2) if peak_equity > 0 else 0.0,
+        "daily_pnl": round(realised_pnl, 2),
+        "daily_pnl_pct": round((realised_pnl / peak_equity * 100.0), 2) if peak_equity > 0 else 0.0,
         "current_drawdown_pct": round(drawdown_pct, 2),
         "soft_limit_pct": settings.SOFT_DAILY_DRAWDOWN_LIMIT_PCT,
         "hard_limit_pct": settings.HARD_TOTAL_DRAWDOWN_LIMIT_PCT,
         "active_positions_count": len(active_positions),
-        "exposure": {p.symbol: round(p.volume, 2) for p in active_positions}
+        "exposure": {p.get("symbol"): round(p.get("volume", 0), 2) for p in active_positions}
     }
 
 @app.get("/api/risk/status")
@@ -400,102 +401,4 @@ def get_models() -> List[Dict[str, Any]]:
                 "stage": "PRODUCTION"
             }
         ]
-    return [m.dict() for m in models]
-
-@app.get("/api/strategies")
-def get_strategies() -> List[Dict[str, Any]]:
-    return [
-        {
-            "id": "STRAT_TREND_01",
-            "name": "Multi-Timeframe Trend Following",
-            "symbol": "XAUUSD",
-            "type": "Trend Following",
-            "stage": "PRODUCTION",
-            "win_rate": 0.62,
-            "sharpe_ratio": 2.10,
-            "trades": 142,
-            "pbo": 0.04,
-            "dsr": 2.15,
-            "status": "ACTIVE"
-        },
-        {
-            "id": "STRAT_BREAKOUT_01",
-            "name": "Volatility Compression Breakout",
-            "symbol": "BTCUSD",
-            "type": "Breakout",
-            "stage": "PAPER",
-            "win_rate": 0.58,
-            "sharpe_ratio": 1.85,
-            "trades": 88,
-            "pbo": 0.07,
-            "dsr": 1.72,
-            "status": "PAPER_TRADING"
-        },
-        {
-            "id": "STRAT_MEAN_REV_01",
-            "name": "Bollinger Deviation Reversion",
-            "symbol": "EURUSD",
-            "type": "Mean Reversion",
-            "stage": "VALIDATION",
-            "win_rate": 0.54,
-            "sharpe_ratio": 1.40,
-            "trades": 64,
-            "pbo": 0.12,
-            "dsr": 1.25,
-            "status": "UNDER_REVIEW"
-        }
-    ]
-
-# telegram_notifier import moved to where needed for trade alerts only
-
-@app.post("/api/stress-test/run")
-def run_stress_test():
-    res = stress_engine.run_stress_test_suite()
-    logger.info(f"Stress test completed: flash_crash_survival={res.get('flash_crash_survival')}")
-    return res
-
-@app.post("/api/trade/test")
-def trigger_test_trade(symbol: str = "XAUUSD", signal_type: str = "BUY", volume: float = 0.10, price: float = 4050.30):
-    sl = price - 20.0 if signal_type.upper() == "BUY" else price + 20.0
-    tp = price + 30.0 if signal_type.upper() == "BUY" else price - 30.0
-    
-    return {
-        "status": "EXECUTED_SIMULATION",
-        "symbol": symbol,
-        "signal_type": signal_type,
-        "volume": volume,
-        "price": price,
-        "sl": sl,
-        "tp": tp,
-        "telegram_notified": False  # Test endpoint does not send real trade alerts
-    }
-
-@app.post("/api/notify/heartbeat")
-def send_heartbeat_notification():
-    return {"status": "DISABLED", "message": "Heartbeat notifications are disabled. You only receive trade entry/exit alerts."}
-
-@app.post("/api/signals/notify")
-def send_custom_signal(
-    symbol: str = "XAUUSD",
-    signal_type: str = "BUY",
-    entry_price: float = 0.0,
-    stop_loss: float = 0.0,
-    take_profit: float = 0.0,
-    note: str = ""
-):
-    return {"status": "DISABLED", "message": "Custom signal notifications are disabled. You only receive trade entry/exit alerts."}
-
-@app.post("/api/bot/test-message")
-def send_test_telegram_message(message: str = "✅ Alpha Quant test message: bot is alive and configured."):
-    return {"status": "DISABLED", "message": "Test messages are disabled. Telegram only sends trade entry/exit alerts."}
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await ws_manager.connect(websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Echo heartbeat or state stream
-            await websocket.send_text(data)
-    except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
+    return models

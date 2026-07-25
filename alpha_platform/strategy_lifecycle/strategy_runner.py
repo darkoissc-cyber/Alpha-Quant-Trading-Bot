@@ -342,7 +342,6 @@ class StrategyRunner:
 
         approved: List[TradeCandidate] = []
         active_pos_list = list(self.tracked_positions.values())
-        from datetime import timedelta
 
         for c in candidates:
             # 1. Evaluate Risk

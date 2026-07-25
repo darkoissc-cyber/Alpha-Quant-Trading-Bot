@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from alpha_platform.core.types import OrderType, SignalType
 from alpha_platform.config.settings import settings
@@ -48,109 +49,51 @@ class MT5ExecutionBridge:
         return symbol
 
     async def connect(self) -> bool:
+        if not HAS_MT5_LIB:
+            logger.warning("MetaTrader5 library not found. Running in simulation mode.")
+            return False
+
         def _sync_connect():
-            if HAS_MT5_LIB:
-                logger.info("Connecting to already-open MT5 Terminal session...")
-                initialized = mt5.initialize()
-                if initialized:
-                    acc = mt5.account_info()
-                    if acc is not None:
-                        self.login = acc.login
-                        self.server = acc.server
-                        self.connected = True
-                        logger.info(f"MetaTrader 5 Bridge CONNECTED to existing terminal: account {acc.login} on {acc.server}")
-                        return True
-                    else:
-                        logger.warning(f"MT5 initialized but no account info: {mt5.last_error()}")
-                else:
-                    logger.warning(f"MT5 initialize() without credentials failed: {mt5.last_error()}")
-
-            if HAS_MT5_LIB and self.login and self.password:
-                logger.info(f"Attempting direct MT5 login for account {self.login} on {self.server}...")
-                initialized = mt5.initialize(
-                    login=self.login,
-                    password=self.password,
-                    server=self.server
-                )
-                if initialized:
-                    self.connected = True
-                    logger.info(f"MetaTrader 5 Direct Bridge CONNECTED successfully to account {self.login}")
-                    return True
-                else:
-                    err_msg = f"MT5 Initialization failed: {mt5.last_error()}"
-                    logger.error(err_msg)
-                    # Only hard-fail when the operator EXPLICITLY disabled simulation.
-                    # Production environment with allow_simulation=True must fall
-                    # through to the cloud-simulation mode so Render and CI
-                    # environments can still run end-to-end without a real broker.
-                    if not self.allow_simulation:
-                        raise BrokerConnectionError(err_msg)
-
-            # If the operator explicitly disabled simulation we hard-fail.
-            if not self.allow_simulation:
-                raise BrokerConnectionError("MetaTrader5 library or valid account credentials unavailable, and simulation is disabled.")
-
-            # Otherwise fall through to cloud-simulation mode. This is the
-            # correct path for Render / Linux / Docker / CI where the native
-            # MT5 terminal is unavailable but the operator still wants the
-            # engine to run end-to-end.
-            self.connected = True
-            logger.warning(f"MT5 Execution Bridge operating in Cloud Simulation mode for account {self.login} (env={settings.ENVIRONMENT})")
+            if not mt5.initialize(login=self.login, password=self.password, server=self.server):
+                logger.error(f"MT5 initialization failed: {mt5.last_error()}")
+                return False
             return True
 
-        return await asyncio.to_thread(_sync_connect)
-
-    async def ensure_connected(self) -> bool:
-        if HAS_MT5_LIB and mt5.terminal_info() is None:
-            logger.warning("MT5 Terminal disconnected - attempting auto-reconnect...")
-            return await self.connect()
+        self.connected = await asyncio.to_thread(_sync_connect)
+        if self.connected:
+            logger.info(f"MT5 Execution Bridge connected: account {self.login} on {self.server}")
         return self.connected
 
+    async def ensure_connected(self):
+        if not self.connected:
+            await self.connect()
+
     async def is_market_open(self, symbol: str) -> bool:
-        """
-        Checks if the market for the given symbol is currently open on MT5.
-        Returns True if open, False if closed.
-        In simulation mode (no MT5), returns True by default to allow backtesting.
-        """
-        await self.ensure_connected()
+        """Checks if the market for a given symbol is currently open for trading."""
         def _sync_check():
-            if not HAS_MT5_LIB or mt5.terminal_info() is None:
-                # Fallback for cloud/simulation mode: assume open unless we want to implement a calendar.
-                return True
-            
-            resolved = self.resolve_symbol(symbol)
-            info = mt5.symbol_info(resolved)
-            if info is None:
-                return False
-            
-            # Check trade_mode: 0=disabled, 1=long only, 2=short only, 3=full access, 4=close only
-            # Also check if session is active (last tick time)
-            tick = mt5.symbol_info_tick(resolved)
-            if tick is None:
-                return False
-            
-            # If the last tick is more than 1 hour old during market hours, 
-            # or it's a weekend, it's likely closed.
-            import time
-            from datetime import datetime
-            
-            # Check if it's Crypto (BTC, ETH, etc.) - Crypto is ALWAYS open 24/7
-            is_crypto = any(c in resolved.upper() for c in ["BTC", "ETH", "LTC", "XRP", "SOL", "ADA", "DOT"])
-            if is_crypto:
-                # For Crypto, we allow trade_mode 4 (Close Only) for analysis, 
-                # as some brokers use it during weekend maintenance but prices still move.
-                return info.trade_mode in [1, 2, 3, 4]
-
-            # For non-crypto (Forex, Gold), check for weekend (Saturday=5, Sunday=6)
-            if datetime.now().weekday() in [5, 6]:
-                return False
-
-            # If the last tick is more than 1 hour old during market hours, it's likely closed.
-            if (time.time() - tick.time) > 3600: # 1 hour
-                return False
+            if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+                resolved = self.resolve_symbol(symbol)
+                sym_info = mt5.symbol_info(resolved)
+                if sym_info is None:
+                    return False
                 
-            return info.trade_mode in [1, 2, 3] # 4 is close only, usually means market closing/closed
-            
+                # Check if symbol is currently tradable
+                if sym_info.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
+                    return False
+                
+                # Check current tick time vs local time to detect weekend/closed market
+                tick = mt5.symbol_info_tick(resolved)
+                if tick is None:
+                    return False
+                
+                tick_time = datetime.fromtimestamp(tick.time, tz=timezone.utc).replace(tzinfo=None)
+                now_time = datetime.now()
+                # If the last tick is older than 5 minutes, market is likely closed or stale
+                if (now_time - tick_time).total_seconds() > 300:
+                    return False
+                
+                return True
+            return True # Assume open in simulation mode
         return await asyncio.to_thread(_sync_check)
 
     async def send_order(
@@ -176,9 +119,7 @@ class MT5ExecutionBridge:
 
         def _sync_send():
             import time as _time
-            _now_ts = _time.time()  # Use time.time() instead of asyncio.get_event_loop().time()
-                                     # because this runs inside asyncio.to_thread's worker thread
-                                     # which has no event loop attached.
+            _now_ts = _time.time()
             if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
                 sym_info = mt5.symbol_info(resolved_symbol)
                 digits = sym_info.digits if sym_info is not None else 2
@@ -196,13 +137,9 @@ class MT5ExecutionBridge:
                 # Ensure minimum broker stop distance
                 min_sl_dist = 2.50 if "XAU" in resolved_symbol else (0.00060 if ("EUR" in resolved_symbol or "GBP" in resolved_symbol) else 100.0)
                 if signal_type == SignalType.BUY:
-                    # BUY: SL must be below fill, TP must be above fill
                     sl_r = min(sl_r, fill_price_r - min_sl_dist)
                     tp_r = max(tp_r, fill_price_r + (min_sl_dist * 1.5))
                 else:
-                    # SELL: SL must be above fill, TP must be below fill.
-                    # FIX: previously the second branch used `min(tp_r, fill_price_r - min_sl_dist*1.5)`
-                    # which forced TP to a tiny distance when the strategy wanted a wider TP.
                     sl_r = max(sl_r, fill_price_r + min_sl_dist)
                     tp_r = min(tp_r, fill_price_r - (min_sl_dist * 1.5))
 
@@ -210,13 +147,8 @@ class MT5ExecutionBridge:
                 sl_r = round(float(sl_r), digits)
                 tp_r = round(float(tp_r), digits)
 
-                # CRITICAL FIX: Normalize and round volume to broker requirements
-                # Most brokers (Exness) require volume in steps of 0.01, min 0.01.
-                # Crypto/Gold might have different step/min rules.
                 vol_step = sym_info.volume_step if sym_info is not None else 0.01
                 vol_min = sym_info.volume_min if sym_info is not None else 0.01
-                
-                # Round to nearest step and ensure at least minimum
                 final_volume = round(max(vol_min, (round(volume / vol_step) * vol_step)), 2)
                 logger.info(f"[MT5Bridge] Normalizing volume for {resolved_symbol}: requested={volume}, final={final_volume} (step={vol_step}, min={vol_min})")
 
@@ -247,7 +179,7 @@ class MT5ExecutionBridge:
                         "timestamp": _now_ts
                     }
                 else:
-                    reason = self._sanitize_error(result.comment) if result else "Unknown MT5 error"
+                    reason = result.comment if result else "Unknown MT5 error"
                     logger.error(f"MT5 Order placement failed: {reason}")
                     return {"status": "REJECTED", "reason": reason}
 
@@ -262,98 +194,6 @@ class MT5ExecutionBridge:
             }
 
         return await asyncio.to_thread(_sync_send)
-
-    async def close_position(self, ticket: int) -> Dict[str, Any]:
-        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
-            positions = mt5.positions_get(ticket=ticket)
-            if positions:
-                pos = positions[0]
-                tick = mt5.symbol_info_tick(pos.symbol)
-                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
-
-                req = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "position": ticket,
-                    "symbol": pos.symbol,
-                    "volume": pos.volume,
-                    "type": close_type,
-                    "price": price,
-                    "deviation": 20,
-                    "magic": 777999,
-                    "comment": "Alpha Quant Close Trade",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                }
-                res = mt5.order_send(req)
-                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                    pips = self._calc_pips(pos.symbol, pos.price_open, res.price, pos.type)
-                    telegram_notifier.notify_trade_closed(pos.symbol, pos.profit, pips)
-                    return {"status": "CLOSED", "ticket": ticket, "close_price": res.price, "profit": pos.profit}
-                else:
-                    # Sanitise error text so we don't leak credentials or other
-                    # sensitive broker-side diagnostics into logs.
-                    reason_raw = res.comment if res else "Unknown MT5 close error"
-                    reason = self._sanitize_error(reason_raw)
-                    logger.error(f"MT5 close position #{ticket} failed: {reason}")
-                    return {"status": "REJECTED", "reason": reason}
-
-        # Simulation fallback: do NOT report a fake profit. If the operator
-        # has a tracked position for this ticket, compute the simulated PnL
-        # from the stored entry price vs current best-known price so the
-        # accounting system is not lied to.
-        tracked = None
-        try:
-            tracked = await self.get_active_positions()
-        except Exception:
-            tracked = []
-        # get_active_positions returns empty in pure simulation mode (no MT5),
-        # so the operator must rely on StrategyRunner.tracked_positions.
-        # We log clearly that the PnL is unknown rather than fabricating 0.0.
-        logger.warning(
-            f"[Simulation] Closing position #{ticket} (no live MT5 session). "
-            f"PnL UNKNOWN - operator must verify against local tracked state."
-        )
-        return {
-            "status": "SIMULATED_CLOSED",
-            "ticket": ticket,
-            "profit": 0.0,
-            "profit_status": "UNKNOWN_IN_SIMULATION",
-        }
-
-    @staticmethod
-    def _sanitize_error(reason: str) -> str:
-        """
-        Strip anything that looks like a credential, password, server name
-        with account-id pattern, or long opaque token from broker error
-        strings before they get logged or pushed to Telegram.
-        """
-        if not reason:
-            return "Unknown broker error"
-        import re
-        # Mask anything that looks like a long base64/hex token
-        reason = re.sub(r"[A-Za-z0-9+/=]{32,}", "[REDACTED]", reason)
-        # Mask passwords written as "password=..."
-        reason = re.sub(r"(?i)(password|passwd|pwd)\s*=\s*\S+", r"\1=[REDACTED]", reason)
-        # Mask account numbers (6+ digits)
-        reason = re.sub(r"\b\d{6,}\b", "[ACCT]", reason)
-        return reason[:200]  # cap length to prevent log spam
-
-    def _calc_pips(self, symbol: str, open_price: float, close_price: float, pos_type: int) -> float:
-        """Best-effort pips calculation. Used for Telegram notifications only."""
-        try:
-            # Crude convention: 1 pip = 0.01 for XAU-like gold, 1.0 for BTC, 0.0001 for FX
-            sym = symbol.upper()
-            if "XAU" in sym:
-                pip_unit = 0.01
-            elif "BTC" in sym:
-                pip_unit = 1.0
-            else:
-                pip_unit = 0.0001
-            direction = 1 if pos_type == 0 else -1  # mt5.POSITION_TYPE_BUY == 0
-            return round((close_price - open_price) / pip_unit * direction, 1)
-        except Exception:
-            return 0.0
 
     async def modify_order_sltp(self, ticket: int, sl: float, tp: float) -> Dict[str, Any]:
         """Modifies Stop-Loss and Take-Profit of an open position on MT5 server."""
@@ -383,39 +223,8 @@ class MT5ExecutionBridge:
         logger.info(f"[Simulation] Modified position #{ticket} SL/TP: SL={sl}, TP={tp}")
         return {"status": "SIMULATED_MODIFIED", "ticket": ticket, "sl": sl, "tp": tp}
 
-    async def partial_close_position(self, ticket: int, close_volume: float) -> Dict[str, Any]:
-        """Partially closes an open position by specifying a partial volume."""
-        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
-            positions = mt5.positions_get(ticket=ticket)
-            if positions:
-                pos = positions[0]
-                vol_to_close = min(pos.volume, close_volume)
-                tick = mt5.symbol_info_tick(pos.symbol)
-                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
-
-                req = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "position": ticket,
-                    "symbol": pos.symbol,
-                    "volume": vol_to_close,
-                    "type": close_type,
-                    "price": price,
-                    "deviation": 20,
-                    "magic": 777999,
-                    "comment": "Alpha Quant Partial Close",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": mt5.ORDER_FILLING_IOC
-                }
-                res = mt5.order_send(req)
-                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                    logger.info(f"Position #{ticket} PARTIALLY CLOSED: {vol_to_close} lot @ {res.price}")
-                    return {"status": "PARTIALLY_CLOSED", "ticket": ticket, "closed_volume": vol_to_close, "close_price": res.price}
-
-        logger.info(f"[Simulation] Partially closed position #{ticket}: {close_volume} lot")
-        return {"status": "SIMULATED_PARTIAL_CLOSE", "ticket": ticket, "closed_volume": close_volume}
-
     async def get_active_positions(self) -> List[Dict[str, Any]]:
+        """Fetches all open positions currently active on the broker account."""
         def _sync_get():
             if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
                 positions = mt5.positions_get()
@@ -438,3 +247,70 @@ class MT5ExecutionBridge:
                     ]
             return []
         return await asyncio.to_thread(_sync_get)
+
+    async def close_position(self, ticket: int) -> Dict[str, Any]:
+        """Closes an open position at market price."""
+        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos = positions[0]
+                tick = mt5.symbol_info_tick(pos.symbol)
+                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": pos.symbol,
+                    "volume": pos.volume,
+                    "type": close_type,
+                    "position": ticket,
+                    "price": price,
+                    "deviation": 20,
+                    "magic": 777999,
+                    "comment": "Alpha Quant Close",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                result = mt5.order_send(request)
+                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"Position #{ticket} CLOSED on MT5.")
+                    return {"status": "CLOSED", "ticket": ticket}
+                else:
+                    reason = result.comment if result else "Unknown MT5 close error"
+                    logger.error(f"Failed to close position #{ticket}: {reason}")
+                    return {"status": "REJECTED", "reason": reason}
+        return {"status": "SIMULATED_CLOSED", "ticket": ticket}
+
+    async def partial_close_position(self, ticket: int, close_volume: float) -> Dict[str, Any]:
+        """Partially closes an open position by specifying a partial volume."""
+        if HAS_MT5_LIB and self.connected and mt5.terminal_info() is not None:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos = positions[0]
+                vol_to_close = min(pos.volume, close_volume)
+                tick = mt5.symbol_info_tick(pos.symbol)
+                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+
+                req = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": pos.symbol,
+                    "volume": vol_to_close,
+                    "type": close_type,
+                    "position": ticket,
+                    "price": price,
+                    "deviation": 20,
+                    "magic": 777999,
+                    "comment": "Alpha Quant Partial Close",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"Position #{ticket} PARTIALLY CLOSED on MT5. Vol closed: {vol_to_close}")
+                    return {"status": "PARTIALLY_CLOSED", "ticket": ticket, "closed_volume": vol_to_close}
+                else:
+                    reason = res.comment if res else "Unknown MT5 partial close error"
+                    logger.error(f"Failed to partially close position #{ticket}: {reason}")
+                    return {"status": "REJECTED", "reason": reason}
+        return {"status": "SIMULATED_PARTIAL_CLOSE", "ticket": ticket, "closed_volume": close_volume}
